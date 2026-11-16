@@ -25,7 +25,7 @@
 
 ## Install
 
-Download `Beautiful Disk.dmg` from the [latest release](https://github.com/vkpdeveloper/beautifuldisk/releases/latest) and drag the app to Applications.
+Download `Beautiful-Disk.dmg` from the [latest release](https://github.com/vkpdeveloper/beautifuldisk/releases/latest) and drag the app to Applications.
 
 The app is not notarized yet. On first launch, right-click it and choose Open, or run:
 
