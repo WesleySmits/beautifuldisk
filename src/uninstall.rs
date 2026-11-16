@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui_kit::Image;
+use gpui_kit::{Image, ImageFormat};
 
 use crate::clutter::{dir_size, run_for};
 
@@ -250,9 +250,10 @@ mod linux {
             } else {
                 Path::new("/var/lib/flatpak/app").join(id)
             };
+            let exports = installed.join("../../exports/share");
             apps.push(App {
                 name: name.trim().to_owned(),
-                icon: None,
+                icon: themed(&exports, id.trim()),
                 id: id.trim().to_owned(),
                 kind: Kind::Flatpak { user },
                 files: sized([installed, home.join(".var/app").join(id)]),
@@ -260,26 +261,41 @@ mod linux {
         }
         // Snaps with a menu entry are apps; the rest are runtimes and themes.
         let desktop = Path::new("/var/lib/snapd/desktop/applications");
-        let mut snaps: Vec<(String, String)> = fs::read_dir(desktop)
+        let mut entries: Vec<(String, String)> = fs::read_dir(desktop)
             .into_iter()
             .flatten()
             .flatten()
             .filter_map(|e| {
                 let file = e.file_name().into_string().ok()?;
-                file.strip_suffix(".desktop")?;
-                let snap = file.split('_').next()?.to_owned();
-                let text = fs::read_to_string(e.path()).unwrap_or_default();
-                let name = text
-                    .lines()
-                    .find_map(|l| l.strip_prefix("Name="))
-                    .unwrap_or(&snap)
-                    .to_owned();
-                Some((snap, name))
+                let entry = file.strip_suffix(".desktop")?;
+                let snap = entry.split('_').next()?.to_owned();
+                Some((snap, file))
             })
             .collect();
-        snaps.sort();
-        snaps.dedup_by(|a, b| a.0 == b.0);
-        for (snap, name) in snaps {
+        // The snap's main entry (slack_slack.desktop) first, over helpers
+        // like an updater it also ships.
+        entries
+            .sort_by_key(|(snap, file)| (snap.clone(), *file != format!("{snap}_{snap}.desktop")));
+        entries.dedup_by(|a, b| a.0 == b.0);
+        for (snap, file) in entries {
+            let text = fs::read_to_string(desktop.join(file)).unwrap_or_default();
+            let field = |key: &str| {
+                text.lines()
+                    .find_map(|l| l.strip_prefix(key))
+                    .map(str::to_owned)
+            };
+            let name = field("Name=").unwrap_or_else(|| snap.clone());
+            // Usually a full path into the snap, like /snap/slack/current/...
+            let icon = field("Icon=")
+                .map(|icon| icon.replace("${SNAP}", &format!("/snap/{snap}/current")))
+                .and_then(|icon| {
+                    let path = Path::new(&icon);
+                    if path.is_absolute() {
+                        image(path)
+                    } else {
+                        themed(Path::new("/usr/share"), &icon)
+                    }
+                });
             let images = fs::read_dir("/var/lib/snapd/snaps")
                 .into_iter()
                 .flatten()
@@ -293,7 +309,7 @@ mod linux {
             let files = sized(images.chain([home.join("snap").join(&snap)]));
             apps.push(App {
                 name,
-                icon: None,
+                icon,
                 id: snap,
                 kind: Kind::Snap,
                 files,
@@ -301,6 +317,36 @@ mod linux {
         }
         apps
     }
+}
+
+/// The icon named `name` in the hicolor theme under `share`, largest first.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn themed(share: &Path, name: &str) -> Option<Arc<Image>> {
+    const SIZES: &[&str] = &[
+        "scalable", "512x512", "256x256", "128x128", "64x64", "48x48",
+    ];
+    let theme = share.join("icons/hicolor");
+    SIZES
+        .iter()
+        .flat_map(|size| {
+            let dir = theme.join(size).join("apps");
+            [
+                dir.join(format!("{name}.svg")),
+                dir.join(format!("{name}.png")),
+            ]
+        })
+        .chain([share.join(format!("pixmaps/{name}.png"))])
+        .find_map(|path| image(&path))
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn image(path: &Path) -> Option<Arc<Image>> {
+    let format = match path.extension()?.to_str()? {
+        "svg" => ImageFormat::Svg,
+        "png" => ImageFormat::Png,
+        _ => return None,
+    };
+    Some(Arc::new(Image::from_bytes(format, fs::read(path).ok()?)))
 }
 
 fn demo_apps() -> Vec<App> {

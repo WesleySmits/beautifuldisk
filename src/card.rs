@@ -556,6 +556,12 @@ impl Card {
         let rate = 260.0 / (emit.len().max(1) as f32).sqrt();
         bar::step_particles(&mut self.particles, &mut self.rng, dt, &emit, rate);
 
+        if let Some(apps) = &mut self.apps
+            && apps.tick(dt)
+        {
+            moving = true;
+        }
+
         working || moving || !self.particles.is_empty()
     }
 

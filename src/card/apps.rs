@@ -1,9 +1,14 @@
 //! Removing apps with their files, from a panel over the card.
 
+use std::cell::{Cell, RefCell};
+use std::f32::consts::FRAC_PI_2;
+use std::rc::Rc;
+
+use dither_gpui::dither_core::ease::approach;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{Disableable, Icon, Sizable, h_flex, v_flex};
+use gpui_kit::component::{Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -22,6 +27,59 @@ pub(super) struct Apps {
     note: Option<String>,
     /// Whether anything was removed, so closing rescans.
     changed: bool,
+    /// How far each app's files are shown, 0 to 1, and their full height.
+    reveal: Vec<f32>,
+    heights: Rc<RefCell<Vec<f32>>>,
+    /// The list scrolls itself so wheel steps glide: where it is, where it
+    /// is going, and the heights that bound it.
+    scroll: f32,
+    scroll_to: f32,
+    viewport: Rc<Cell<f32>>,
+    content: Rc<Cell<f32>>,
+}
+
+/// Wheel notches move this far.
+const NOTCH: f32 = 48.0;
+
+impl Apps {
+    /// Eases the open and close and the scroll. Returns whether to keep going.
+    pub(super) fn tick(&mut self, dt: f32) -> bool {
+        let mut moving = false;
+        for (i, reveal) in self.reveal.iter_mut().enumerate() {
+            let to = if self.open == Some(i) { 1.0 } else { 0.0 };
+            *reveal = approach(*reveal, to, dt, 0.05);
+            if (*reveal - to).abs() < 0.002 {
+                *reveal = to;
+            } else {
+                moving = true;
+            }
+        }
+        // Closing an app can leave the list scrolled past its end.
+        let max = (self.content.get() - self.viewport.get()).max(0.0);
+        self.scroll_to = self.scroll_to.clamp(0.0, max);
+        self.scroll = approach(self.scroll, self.scroll_to, dt, 0.04);
+        if (self.scroll - self.scroll_to).abs() < 0.5 {
+            self.scroll = self.scroll_to;
+        } else {
+            moving = true;
+        }
+        // Heights are measured in a frame's layout, so look again next frame.
+        moving || self.list.is_none()
+    }
+
+    fn wheel(&mut self, delta: ScrollDelta) {
+        match delta {
+            // Trackpads already scroll smoothly, with momentum.
+            ScrollDelta::Pixels(p) => {
+                self.scroll_to -= f32::from(p.y);
+                self.scroll = self.scroll_to;
+            }
+            ScrollDelta::Lines(l) => self.scroll_to -= l.y * NOTCH,
+        }
+        let max = (self.content.get() - self.viewport.get()).max(0.0);
+        self.scroll_to = self.scroll_to.clamp(0.0, max);
+        self.scroll = self.scroll.clamp(0.0, max);
+    }
 }
 
 const REMOVE: &str = if cfg!(target_os = "macos") {
@@ -44,6 +102,8 @@ impl Card {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(apps) = &mut this.apps {
+                    apps.reveal = vec![0.0; list.len()];
+                    *apps.heights.borrow_mut() = vec![0.0; list.len()];
                     apps.list = Some(list);
                 }
                 cx.notify();
@@ -88,6 +148,8 @@ impl Card {
                         apps.open = None;
                         if let Some(list) = &mut apps.list {
                             list.remove(i);
+                            apps.reveal.remove(i);
+                            apps.heights.borrow_mut().remove(i);
                         }
                     } else {
                         apps.note = Some(format!("Couldn't remove all of {name}."));
@@ -115,19 +177,36 @@ impl Card {
                 .text_color(muted)
                 .child("No apps you can remove.")
                 .into_any_element(),
-            Some(list) => div()
-                .id("apps-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .border_t_1()
-                .border_color(rgb(LINE))
-                .children(
-                    list.iter()
-                        .enumerate()
-                        .map(|(i, app)| self.app_row(i, app, apps, cx)),
-                )
-                .into_any_element(),
+            Some(list) => {
+                let (viewport, content) = (apps.viewport.clone(), apps.content.clone());
+                v_flex()
+                    .id("apps-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .border_t_1()
+                    .border_color(rgb(LINE))
+                    .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+                        if let Some(apps) = &mut this.apps {
+                            apps.wheel(e.delta);
+                        }
+                        cx.notify();
+                    }))
+                    .child(measure(move |h| viewport.set(h)))
+                    .child(
+                        v_flex()
+                            .flex_none()
+                            .relative()
+                            .top(px(-apps.scroll))
+                            .child(measure(move |h| content.set(h)))
+                            .children(
+                                list.iter()
+                                    .enumerate()
+                                    .map(|(i, app)| self.app_row(i, app, apps, cx)),
+                            ),
+                    )
+                    .into_any_element()
+            }
         };
 
         let panel = v_flex()
@@ -181,7 +260,7 @@ impl Card {
 
     fn app_row(&self, i: usize, app: &App, apps: &Apps, cx: &mut Context<Self>) -> AnyElement {
         let muted = rgb(MUTED);
-        let open = apps.open == Some(i);
+        let reveal = apps.reveal.get(i).copied().unwrap_or(0.0);
         let icon = match &app.icon {
             Some(image) => img(image.clone()).size(px(20.0)).into_any_element(),
             None => duo(icon(Category::Apps), tone(Category::Apps), 16.0).into_any_element(),
@@ -216,17 +295,15 @@ impl Card {
             )
             .child(div().text_color(muted).child(gb(app.bytes() as f64)))
             .child(
-                Icon::new(if open {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .size_3p5()
-                .text_color(muted),
+                svg()
+                    .path(IconName::ChevronRight.path())
+                    .size_3p5()
+                    .text_color(muted)
+                    .with_transformation(Transformation::rotate(radians(reveal * FRAC_PI_2))),
             );
 
         let mut row = v_flex().border_b_1().border_color(rgb(LINE)).child(head);
-        if open {
+        if reveal > 0.0 {
             let files = app.files.iter().map(|(path, bytes)| {
                 h_flex()
                     .gap_3()
@@ -247,42 +324,66 @@ impl Card {
                     )
             });
             let removing = apps.removing;
+            let height = apps.heights.borrow().get(i).copied().unwrap_or(0.0);
+            let heights = apps.heights.clone();
+            let details = v_flex()
+                .flex_none()
+                .relative()
+                .opacity(reveal)
+                .child(measure(move |h| {
+                    if let Some(slot) = heights.borrow_mut().get_mut(i) {
+                        *slot = h;
+                    }
+                }))
+                .gap_2()
+                .pl(px(28.0))
+                .pb_3()
+                .children(files)
+                .children(cfg!(not(target_os = "macos")).then(|| {
+                    div()
+                        .text_color(muted)
+                        .child("Deleted for good, not moved to the Trash.")
+                }))
+                .child(
+                    h_flex()
+                        .pt_1()
+                        .gap_3()
+                        .justify_end()
+                        .children(
+                            apps.note
+                                .clone()
+                                .map(|note| div().flex_1().text_color(muted).child(note)),
+                        )
+                        .children(removing.then(|| Spinner::new().small().color(muted.into())))
+                        .child(
+                            Button::new("app-remove")
+                                .primary()
+                                .small()
+                                .label(REMOVE)
+                                .disabled(removing)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.remove_app(i, cx);
+                                    cx.notify();
+                                })),
+                        ),
+                );
             row = row.child(
                 v_flex()
-                    .gap_2()
-                    .pl(px(28.0))
-                    .pb_3()
-                    .children(files)
-                    .children(cfg!(not(target_os = "macos")).then(|| {
-                        div()
-                            .text_color(muted)
-                            .child("Deleted for good, not moved to the Trash.")
-                    }))
-                    .child(
-                        h_flex()
-                            .pt_1()
-                            .gap_3()
-                            .justify_end()
-                            .children(
-                                apps.note
-                                    .clone()
-                                    .map(|note| div().flex_1().text_color(muted).child(note)),
-                            )
-                            .children(removing.then(|| Spinner::new().small().color(muted.into())))
-                            .child(
-                                Button::new("app-remove")
-                                    .primary()
-                                    .small()
-                                    .label(REMOVE)
-                                    .disabled(removing)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.remove_app(i, cx);
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
+                    .h(px(height * reveal))
+                    .overflow_hidden()
+                    .child(details),
             );
         }
         row.into_any_element()
     }
+}
+
+/// An invisible layer that reports its parent's height after layout.
+fn measure(report: impl Fn(f32) + 'static) -> impl IntoElement {
+    canvas(
+        move |bounds, _, _| report(f32::from(bounds.size.height)),
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
 }
