@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::bulk;
 use crate::clutter::{self, Item};
 use crate::tree::Tree;
+use crate::{access, bulk};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Category {
@@ -241,6 +241,8 @@ pub(crate) fn roots(home: &Path) -> Vec<(PathBuf, Category)> {
             roots.push((path, Category::Developer));
         }
     }
+    // Skipped folders aren't read at all, so macOS never asks about them.
+    roots.retain(|(path, _)| access::scannable(home, path));
     roots
 }
 

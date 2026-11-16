@@ -13,10 +13,12 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::bar::{self, Bar, Particle, Rng, Segment};
-use crate::clutter::{self, Item};
+use crate::clutter::{self, Item, Pick};
 use crate::disk::{self, Category, Progress, Report, Volume};
 use crate::sound::{Sound, Ticker};
 use crate::treemap::{self, Rect};
+
+mod onboarding;
 
 const BG: u32 = 0x161618;
 const FG: u32 = 0xededef;
@@ -38,18 +40,36 @@ fn tone(category: Category) -> Tone {
     }
 }
 
-fn icon(category: Category) -> IconName {
+fn icon(category: Category) -> &'static str {
     match category {
-        Category::Apps => IconName::AppWindow,
-        Category::Developer => IconName::SquareTerminal,
-        Category::Photos => IconName::Image,
-        Category::Movies => IconName::Film,
-        Category::Documents => IconName::FileText,
-        Category::Music => IconName::Music,
-        Category::System => IconName::Settings,
-        Category::Caches => IconName::Package,
-        Category::Trash => IconName::Trash,
+        Category::Apps => "apps",
+        Category::Developer => "developer",
+        Category::Photos => "photos",
+        Category::Movies => "movies",
+        Category::Documents => "documents",
+        Category::Music => "music",
+        Category::System => "system",
+        Category::Caches => "caches",
+        Category::Trash => "trash",
     }
+}
+
+/// One of the app's two-layer icons from `assets/icons`: a dark body with a
+/// bright detail on top, both in `tone`.
+fn duo(name: &'static str, tone: Tone, size: f32) -> Div {
+    let layer = |part: &str, color| {
+        svg()
+            .path(SharedString::from(format!("icons/{name}.{part}.svg")))
+            .absolute()
+            .size_full()
+            .text_color(dither_gpui::hsla(color))
+    };
+    div()
+        .relative()
+        .flex_none()
+        .size(px(size))
+        .child(layer("base", tone.shade(0.22)))
+        .child(layer("accent", tone.base()))
 }
 
 fn gb(bytes: f64) -> String {
@@ -103,11 +123,17 @@ pub struct Card {
     /// Bytes on screen per item, easing toward what is left of it.
     item_shown: Vec<f64>,
     item_glow: Vec<f32>,
-    /// Each item's size when found: fixes the treemap's shape.
+    /// Each item's size when found.
+    item_found: Vec<f64>,
+    /// What fixes the treemap's shape: the size when found, or 0 for items
+    /// that aren't tiles.
     item_size: Vec<f64>,
     /// Size of all items when found.
     items_total: f64,
     hover_item: Option<usize>,
+    /// The developer caches row: its glow, and whether it is hovered.
+    dev_glow: f32,
+    dev_hover: bool,
     /// When the items arrived, for their staggered sweep in.
     items_at: f32,
     clean_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -129,6 +155,8 @@ pub struct Card {
     ticker: Ticker,
     /// The item being cleared last frame, to whoosh when it is done.
     was_cleaning: u64,
+    /// First launch on macOS: which guarded folders to scan, before the scan.
+    onboarding: Option<onboarding::Onboarding>,
 }
 
 /// Legend geometry, shared by the layout and the gliding highlight.
@@ -150,7 +178,7 @@ fn spring(x: f32, v: f32, dt: f32) -> (f32, f32) {
 }
 
 impl Card {
-    pub fn new(demo: bool, autoplay: bool) -> Self {
+    pub fn new(demo: bool, autoplay: bool, cx: &mut Context<Self>) -> Self {
         let mut card = Self {
             demo,
             autoplay,
@@ -168,9 +196,12 @@ impl Card {
             selected: Vec::new(),
             item_shown: Vec::new(),
             item_glow: Vec::new(),
+            item_found: Vec::new(),
             item_size: Vec::new(),
             items_total: 0.0,
             hover_item: None,
+            dev_glow: 0.0,
+            dev_hover: false,
             items_at: 0.0,
             clean_bounds: Rc::default(),
             particles: Vec::new(),
@@ -186,9 +217,10 @@ impl Card {
             sound: Sound::new(),
             ticker: Ticker::default(),
             was_cleaning: 0,
+            onboarding: None,
         };
         // Autoplay waits a moment so a screen recording catches the scan.
-        if !autoplay {
+        if !autoplay && !card.onboard(cx) {
             card.scan();
         }
         card
@@ -217,12 +249,13 @@ impl Card {
         }
     }
 
-    fn clear(&mut self) {
+    /// Clears the items `pick` says, from the treemap or the developer row.
+    fn clear(&mut self, pick: impl Fn(&Self, usize) -> bool) {
         let Some(items) = self.items.clone() else {
             return;
         };
         let chosen: Vec<usize> = (0..items.len())
-            .filter(|&i| self.selected[i] && items[i].left() > 0)
+            .filter(|&i| pick(self, i) && items[i].left() > 0)
             .collect();
         if chosen.is_empty() {
             return;
@@ -230,16 +263,34 @@ impl Card {
         self.phase = Phase::Clearing;
         self.hover = None;
         self.hover_item = None;
+        self.dev_hover = false;
         clutter::clean(items, chosen, self.progress.clone(), self.demo);
     }
 
-    /// Items still worth a chip: everything until cleared away.
+    fn clear_selected(&mut self) {
+        self.clear(|this, i| this.selected[i]);
+    }
+
+    fn is_dev(&self, i: usize) -> bool {
+        self.items
+            .as_ref()
+            .is_some_and(|items| items[i].pick == Pick::Dev)
+    }
+
+    /// Treemap items still worth a tile: everything until cleared away.
     fn visible(&self) -> Vec<usize> {
         let Some(items) = &self.items else {
             return Vec::new();
         };
         (0..items.len())
-            .filter(|&i| items[i].left() > 0 || self.item_shown[i] > 1e6)
+            .filter(|&i| !self.is_dev(i) && (items[i].left() > 0 || self.item_shown[i] > 1e6))
+            .collect()
+    }
+
+    /// Developer caches, largest first.
+    fn dev_items(&self) -> Vec<usize> {
+        (0..self.item_shown.len())
+            .filter(|&i| self.is_dev(i))
             .collect()
     }
 
@@ -260,9 +311,8 @@ impl Card {
         self.shown.iter().sum()
     }
 
-    /// Samples the worker, eases every animated value toward its target and
-    /// says whether another frame is needed.
-    fn tick(&mut self) -> bool {
+    /// Seconds since the last frame, and advances the clock.
+    fn frame_time(&mut self) -> f32 {
         let now = Instant::now();
         // The first frame after idle (a hover starting a glide) would see
         // seconds of elapsed time; use one display frame so it starts smooth.
@@ -273,6 +323,16 @@ impl Card {
         };
         self.last_frame = now;
         self.time += dt;
+        dt
+    }
+
+    /// Samples the worker, eases every animated value toward its target and
+    /// says whether another frame is needed.
+    fn tick(&mut self) -> bool {
+        let dt = self.frame_time();
+        if let Some(onboarding) = &mut self.onboarding {
+            return onboarding.tick(dt);
+        }
 
         let working = self.phase != Phase::Idle;
         if working {
@@ -383,13 +443,38 @@ impl Card {
             && self.phase == Phase::Idle
             && let Some(items) = self.progress.items()
         {
-            self.selected = items.iter().map(|i| i.on).collect();
+            self.selected = items.iter().map(|i| i.pick == Pick::On).collect();
             self.item_shown = vec![0.0; items.len()];
             self.item_glow = vec![0.0; items.len()];
-            self.item_size = items.iter().map(|i| i.left() as f64).collect();
-            self.items_total = self.item_size.iter().sum();
+            self.item_found = items.iter().map(|i| i.left() as f64).collect();
+            self.items_total = self.item_found.iter().sum();
+            // Developer caches get their own row, not a tile.
+            self.item_size = items
+                .iter()
+                .map(|i| match i.pick {
+                    Pick::Dev => 0.0,
+                    _ => i.left() as f64,
+                })
+                .collect();
             self.items_at = self.time;
             self.items = Some(items);
+        }
+        if self.items.is_some() {
+            let busy_dev = self
+                .dev_items()
+                .into_iter()
+                .any(|i| busy(self.progress.cleaning(), i));
+            let glow_to = if busy_dev || self.dev_hover {
+                1.0
+            } else {
+                0.62
+            };
+            self.dev_glow = approach(self.dev_glow, glow_to, dt, 0.06);
+            if (self.dev_glow - glow_to).abs() > 0.005 {
+                moving = true;
+            } else {
+                self.dev_glow = glow_to;
+            }
         }
         if self.autoplay && self.play_script() {
             moving = true;
@@ -497,7 +582,7 @@ impl Card {
                 true
             }
             None => {
-                self.clear();
+                self.clear_selected();
                 false
             }
         }
@@ -512,7 +597,10 @@ impl Card {
         items
             .iter()
             .zip(&self.item_shown)
-            .map(|(item, &shown)| shown.max(item.left() as f64))
+            .map(|(item, &shown)| match item.pick {
+                Pick::Dev => 0.0,
+                _ => shown.max(item.left() as f64),
+            })
             .collect()
     }
 
@@ -646,11 +734,7 @@ impl Card {
             return h_flex()
                 .gap_2()
                 .min_w_0()
-                .child(
-                    Icon::new(icon(c))
-                        .size_3p5()
-                        .text_color(dither_gpui::hsla(tone(c).base())),
-                )
+                .child(duo(icon(c), tone(c), 14.0))
                 .child(div().flex_none().text_color(rgb(FG)).child(c.name()))
                 .child(
                     div()
@@ -779,6 +863,7 @@ impl Card {
                     glow: self.item_glow[i],
                     reveal: (self.item_shown[i] / weights[i].max(1.0)) as f32,
                     busy: busy(cleaning, i),
+                    clear: 0.0,
                 };
                 (inset(tiles[i]), tile)
             })
@@ -906,6 +991,137 @@ impl Card {
             )
     }
 
+    /// Every developer cache in one row, cleared with one button. These are
+    /// downloads and build caches the tools fetch again on their own.
+    fn dev_row(&self, items: &[Item], cx: &mut Context<Self>) -> Option<AnyElement> {
+        let mut dev = self.dev_items();
+        if dev.is_empty() {
+            return None;
+        }
+        dev.sort_by(|&a, &b| self.item_found[b].total_cmp(&self.item_found[a]));
+        let found: f64 = dev.iter().map(|&i| self.item_found[i]).sum();
+        let shown: f64 = dev.iter().map(|&i| self.item_shown[i]).sum();
+        let cleaning = self.progress.cleaning();
+        let busy_dev = dev.iter().any(|&i| busy(cleaning, i));
+        let left = dev.iter().any(|&i| items[i].left() > 0);
+        let muted = rgb(MUTED);
+
+        let names: Vec<&str> = dev
+            .iter()
+            .filter(|&&i| items[i].left() > 0)
+            .map(|&i| items[i].name.as_str())
+            .collect();
+        let detail = if busy_dev {
+            tilde(&self.progress.current())
+        } else if names.is_empty() {
+            "All cleared".into()
+        } else if names.len() <= 3 {
+            names.join(", ")
+        } else {
+            format!("{} and {} more", names[..3].join(", "), names.len() - 3)
+        };
+
+        let tone = tone(Category::Developer);
+        let tile = treemap::Tile {
+            tone,
+            on: left,
+            glow: self.dev_glow,
+            reveal: (shown / found.max(1.0)) as f32,
+            busy: busy_dev,
+            clear: 0.62,
+        };
+        let time = self.time;
+        // A few of the tools' icons, overlapping.
+        let icons = h_flex().flex_none().children(
+            dev.iter()
+                .filter_map(|&i| items[i].icon.clone())
+                .take(4)
+                .enumerate()
+                .map(|(k, icon)| {
+                    div()
+                        .when(k > 0, |d| d.ml(px(-5.0)))
+                        .p(px(2.0))
+                        .rounded_full()
+                        .bg(rgb(BG))
+                        .child(img(icon).size(px(18.0)))
+                }),
+        );
+        let idle = self.phase == Phase::Idle;
+        Some(
+            div()
+                .id("dev-caches")
+                .relative()
+                .flex_none()
+                .h(px(64.0))
+                .w_full()
+                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                    if this.phase == Phase::Idle && !this.autoplay {
+                        this.dev_hover = *hovered;
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, _| {
+                            treemap::paint(&tile, bounds, bounds.origin, time, window)
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .child(
+                    h_flex()
+                        .absolute()
+                        .size_full()
+                        .px_4()
+                        .gap_3()
+                        .child(icons)
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_0p5()
+                                .child(
+                                    h_flex()
+                                        .items_baseline()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child("Developer caches"),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_family("Menlo")
+                                                .font_weight(FontWeight::BOLD)
+                                                .child(gb(shown)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(12.0))
+                                        .text_color(muted)
+                                        .child(detail),
+                                ),
+                        )
+                        .child(
+                            Button::new("clear-dev")
+                                .primary()
+                                .small()
+                                .label("Clear")
+                                .disabled(!idle || !left)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.clear(|this, i| this.is_dev(i));
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn cleanup(&self, cx: &mut Context<Self>) -> AnyElement {
         let row = h_flex().h(px(30.0)).gap_2().items_center();
         let Some(items) = self.items.clone() else {
@@ -918,14 +1134,17 @@ impl Card {
                 )
                 .into_any_element();
         };
-        let visible = self.visible();
-        if visible.is_empty() {
-            return row
-                .child(Icon::new(IconName::Check).size_3p5().text_color(rgb(OK)))
+        if self.visible().is_empty() {
+            return v_flex()
+                .gap_3()
+                .children(self.dev_row(&items, cx))
                 .child(
-                    div()
-                        .text_color(rgb(MUTED))
-                        .child("Nothing else is worth clearing right now."),
+                    row.child(Icon::new(IconName::Check).size_3p5().text_color(rgb(OK)))
+                        .child(
+                            div()
+                                .text_color(rgb(MUTED))
+                                .child("Nothing else is worth clearing right now."),
+                        ),
                 )
                 .into_any_element();
         }
@@ -967,7 +1186,7 @@ impl Card {
                     .label("Clear")
                     .disabled(!idle || selected < 1e6)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.clear();
+                        this.clear_selected();
                         cx.notify();
                     })),
             );
@@ -977,6 +1196,7 @@ impl Card {
             .flex_1()
             .min_h_0()
             .gap_3()
+            .children(self.dev_row(&items, cx))
             .child(header)
             .child(map)
             .into_any_element()
@@ -988,6 +1208,9 @@ impl Render for Card {
         self.animating = self.tick();
         if self.animating {
             window.request_animation_frame();
+        }
+        if self.onboarding.is_some() {
+            return self.render_onboarding(cx);
         }
         let idle = self.phase == Phase::Idle;
 
@@ -1098,11 +1321,7 @@ impl Render for Card {
                         }
                         cx.notify();
                     }))
-                    .child(
-                        Icon::new(icon(c))
-                            .size_3p5()
-                            .text_color(dither_gpui::hsla(tone(c).base())),
-                    )
+                    .child(duo(icon(c), tone(c), 14.0))
                     .child(div().flex_1().text_color(rgb(FG)).child(c.name()))
                     .child(
                         div()
@@ -1140,6 +1359,7 @@ impl Render for Card {
             .child(legend)
             .child(div().flex_none().h(px(1.0)).bg(rgb(LINE)))
             .child(self.cleanup(cx))
+            .into_any_element()
     }
 }
 

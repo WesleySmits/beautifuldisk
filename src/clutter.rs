@@ -13,12 +13,14 @@ use dither_gpui::dither_core::Tone;
 use gpui_kit::Image;
 use rayon::prelude::*;
 
+use crate::access;
 use crate::disk::{self, Category, Progress};
 use crate::icons::{self, Logo, Source};
 use crate::tree::{self, Index};
 
 /// Smaller finds are not worth a chip.
 const MIN_BYTES: u64 = 50_000_000;
+const MIN_DEV_BYTES: u64 = 5_000_000;
 /// A worktree touched more recently than this may be in use by an agent.
 const RECENT: Duration = Duration::from_secs(2 * 24 * 3600);
 
@@ -29,10 +31,22 @@ pub struct Item {
     pub tone: Tone,
     pub icon: Option<Arc<Image>>,
     pub category: Category,
-    /// Selected when first shown. Off for things that may hold your own work.
-    pub on: bool,
+    pub pick: Pick,
     left: AtomicU64,
     how: How,
+}
+
+/// How safe an item is to clear, which decides where it shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pick {
+    /// A tool's own download or build cache, fetched or rebuilt without
+    /// asking. Cleared together from the developer caches row.
+    Dev,
+    /// In the treemap, selected when first shown.
+    On,
+    /// In the treemap, unselected: may hold your own work, or needs you to
+    /// reinstall something by hand.
+    Off,
 }
 
 enum How {
@@ -49,6 +63,10 @@ enum How {
     /// A command for the `docker` binary at this path that frees about this
     /// many bytes.
     Docker(PathBuf, &'static [&'static str], u64),
+    /// A package manager's download cache outside home, emptied by the
+    /// package manager itself through `pkexec`, which asks for the password.
+    /// What is freed is measured again afterwards.
+    System(&'static [&'static str], Vec<PathBuf>),
     /// Sample data for `--demo`.
     Demo,
 }
@@ -66,7 +84,7 @@ struct Spec {
     paths: &'static [&'static str],
     hue: f32,
     icon: Source,
-    on: bool,
+    pick: Pick,
 }
 
 const fn spec(
@@ -75,7 +93,7 @@ const fn spec(
     paths: &'static [&'static str],
     hue: f32,
     icon: Source,
-    on: bool,
+    pick: Pick,
 ) -> Spec {
     Spec {
         name,
@@ -83,7 +101,7 @@ const fn spec(
         paths,
         hue,
         icon,
-        on,
+        pick,
     }
 }
 
@@ -100,7 +118,7 @@ const CACHES: &[Spec] = &[
         &["Library/Developer/Xcode/DerivedData"],
         215.0,
         XCODE,
-        true,
+        Pick::Dev,
     ),
     spec(
         "Xcode caches",
@@ -108,7 +126,7 @@ const CACHES: &[Spec] = &[
         &["Library/Caches/com.apple.dt.Xcode"],
         215.0,
         XCODE,
-        true,
+        Pick::Dev,
     ),
     spec(
         "Simulator caches",
@@ -116,7 +134,7 @@ const CACHES: &[Spec] = &[
         &["Library/Developer/CoreSimulator/Caches"],
         220.0,
         SIMULATOR,
-        true,
+        Pick::Dev,
     ),
     spec(
         "Device support",
@@ -129,7 +147,7 @@ const CACHES: &[Spec] = &[
         ],
         210.0,
         XCODE,
-        false,
+        Pick::Off,
     ),
     spec(
         "Xcode archives",
@@ -137,7 +155,7 @@ const CACHES: &[Spec] = &[
         &["Library/Developer/Xcode/Archives"],
         205.0,
         XCODE,
-        false,
+        Pick::Off,
     ),
     spec(
         "Gradle",
@@ -145,7 +163,7 @@ const CACHES: &[Spec] = &[
         &[".gradle/caches", ".gradle/wrapper/dists"],
         195.0,
         Source::Logo(Logo::Gradle),
-        true,
+        Pick::Dev,
     ),
     spec(
         "pnpm store",
@@ -158,23 +176,23 @@ const CACHES: &[Spec] = &[
         ],
         45.0,
         Source::Logo(Logo::Pnpm),
-        true,
+        Pick::Dev,
     ),
     spec(
         "bun cache",
         AGAIN,
-        &[".bun/install/cache"],
+        &[".bun/install/cache", "Library/Caches/bun"],
         70.0,
         Source::Logo(Logo::Bun),
-        true,
+        Pick::Dev,
     ),
     spec(
         "npm cache",
         AGAIN,
-        &[".npm/_cacache"],
+        &[".npm/_cacache", ".npm/_npx"],
         25.0,
         Source::Logo(Logo::Npm),
-        true,
+        Pick::Dev,
     ),
     spec(
         "Yarn cache",
@@ -182,15 +200,21 @@ const CACHES: &[Spec] = &[
         &["Library/Caches/Yarn", ".yarn/berry/cache", ".cache/yarn"],
         200.0,
         Source::Logo(Logo::Yarn),
-        true,
+        Pick::Dev,
     ),
     spec(
         "Go modules",
         AGAIN,
-        &["go/pkg/mod", "Library/Caches/go-build", ".cache/go-build"],
+        &[
+            "go/pkg/mod",
+            "Library/Caches/go-build",
+            ".cache/go-build",
+            "Library/Caches/golangci-lint",
+            ".cache/golangci-lint",
+        ],
         190.0,
         Source::Logo(Logo::Go),
-        true,
+        Pick::Dev,
     ),
     spec(
         "Cargo downloads",
@@ -199,10 +223,12 @@ const CACHES: &[Spec] = &[
             ".cargo/registry/cache",
             ".cargo/registry/src",
             ".cargo/git/checkouts",
+            ".rustup/downloads",
+            ".rustup/tmp",
         ],
         40.0,
         Source::Logo(Logo::Rust),
-        true,
+        Pick::Dev,
     ),
     spec(
         "uv cache",
@@ -210,7 +236,7 @@ const CACHES: &[Spec] = &[
         &[".cache/uv"],
         300.0,
         Source::Logo(Logo::Uv),
-        true,
+        Pick::Dev,
     ),
     spec(
         "pip cache",
@@ -218,7 +244,7 @@ const CACHES: &[Spec] = &[
         &["Library/Caches/pip", ".cache/pip"],
         55.0,
         Source::Logo(Logo::Python),
-        true,
+        Pick::Dev,
     ),
     spec(
         "Homebrew downloads",
@@ -226,7 +252,7 @@ const CACHES: &[Spec] = &[
         &["Library/Caches/Homebrew", ".cache/Homebrew"],
         50.0,
         Source::Logo(Logo::HomeBrew),
-        true,
+        Pick::Dev,
     ),
     spec(
         "CocoaPods",
@@ -234,7 +260,7 @@ const CACHES: &[Spec] = &[
         &["Library/Caches/CocoaPods"],
         15.0,
         Source::Logo(Logo::CocoaPods),
-        true,
+        Pick::Dev,
     ),
     spec(
         "Playwright browsers",
@@ -242,7 +268,7 @@ const CACHES: &[Spec] = &[
         &["Library/Caches/ms-playwright", ".cache/ms-playwright"],
         140.0,
         Source::File,
-        true,
+        Pick::On,
     ),
     spec(
         "Chrome cache",
@@ -254,7 +280,7 @@ const CACHES: &[Spec] = &[
         ],
         220.0,
         Source::App("com.google.Chrome", None),
-        true,
+        Pick::On,
     ),
     spec(
         "Arc cache",
@@ -262,7 +288,7 @@ const CACHES: &[Spec] = &[
         &["Library/Caches/company.thebrowser.Browser"],
         330.0,
         Source::App("company.thebrowser.Browser", None),
-        true,
+        Pick::On,
     ),
     spec(
         "Brave cache",
@@ -270,7 +296,7 @@ const CACHES: &[Spec] = &[
         &["Library/Caches/BraveSoftware", ".cache/BraveSoftware"],
         20.0,
         Source::App("com.brave.Browser", None),
-        true,
+        Pick::On,
     ),
     spec(
         "Firefox cache",
@@ -278,7 +304,7 @@ const CACHES: &[Spec] = &[
         &["Library/Caches/Firefox", ".cache/mozilla"],
         30.0,
         Source::App("org.mozilla.firefox", None),
-        true,
+        Pick::On,
     ),
     spec(
         "Safari cache",
@@ -286,7 +312,7 @@ const CACHES: &[Spec] = &[
         &["Library/Caches/com.apple.Safari"],
         205.0,
         Source::App("com.apple.Safari", None),
-        true,
+        Pick::On,
     ),
     spec(
         "Maven",
@@ -294,7 +320,7 @@ const CACHES: &[Spec] = &[
         &[".m2/repository"],
         10.0,
         Source::File,
-        false,
+        Pick::Off,
     ),
     spec(
         "Deno cache",
@@ -302,7 +328,7 @@ const CACHES: &[Spec] = &[
         &["Library/Caches/deno", ".cache/deno"],
         170.0,
         Source::File,
-        true,
+        Pick::Dev,
     ),
     spec(
         "Composer cache",
@@ -314,15 +340,15 @@ const CACHES: &[Spec] = &[
         ],
         240.0,
         Source::File,
-        true,
+        Pick::Dev,
     ),
     spec(
         "Dart and Flutter packages",
         AGAIN,
-        &[".pub-cache"],
+        &[".pub-cache/hosted", ".pub-cache/git"],
         200.0,
         Source::File,
-        true,
+        Pick::Dev,
     ),
     spec(
         "Bazel cache",
@@ -330,7 +356,7 @@ const CACHES: &[Spec] = &[
         &[".cache/bazel"],
         120.0,
         Source::File,
-        true,
+        Pick::Dev,
     ),
     spec(
         "Compiler caches",
@@ -344,7 +370,7 @@ const CACHES: &[Spec] = &[
         ],
         30.0,
         Source::File,
-        true,
+        Pick::Dev,
     ),
     spec(
         "node-gyp headers",
@@ -352,7 +378,7 @@ const CACHES: &[Spec] = &[
         &[".cache/node-gyp", "Library/Caches/node-gyp"],
         95.0,
         Source::Logo(Logo::Node),
-        true,
+        Pick::Dev,
     ),
     spec(
         "Test browsers",
@@ -364,7 +390,7 @@ const CACHES: &[Spec] = &[
         ],
         150.0,
         Source::File,
-        true,
+        Pick::On,
     ),
     spec(
         "Electron downloads",
@@ -377,7 +403,7 @@ const CACHES: &[Spec] = &[
         ],
         200.0,
         Source::File,
-        true,
+        Pick::Dev,
     ),
     spec(
         "pre-commit hooks",
@@ -385,7 +411,7 @@ const CACHES: &[Spec] = &[
         &[".cache/pre-commit"],
         60.0,
         Source::Logo(Logo::Python),
-        true,
+        Pick::Dev,
     ),
     spec(
         "JetBrains caches",
@@ -393,7 +419,7 @@ const CACHES: &[Spec] = &[
         &[".cache/JetBrains", "Library/Caches/JetBrains"],
         320.0,
         Source::File,
-        true,
+        Pick::Dev,
     ),
     spec(
         "VS Code caches",
@@ -406,7 +432,135 @@ const CACHES: &[Spec] = &[
         ],
         210.0,
         Source::App("com.microsoft.VSCode", None),
-        true,
+        Pick::Dev,
+    ),
+    spec(
+        "AUR builds",
+        "Packages yay and paru built. Built again on the next update.",
+        &[".cache/yay", ".cache/paru"],
+        200.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "Poetry cache",
+        AGAIN,
+        &[
+            "Library/Caches/pypoetry/cache",
+            "Library/Caches/pypoetry/artifacts",
+            ".cache/pypoetry/cache",
+            ".cache/pypoetry/artifacts",
+        ],
+        230.0,
+        Source::Logo(Logo::Python),
+        Pick::Dev,
+    ),
+    spec(
+        "TypeScript types",
+        "Types your editor downloaded. Downloaded again when needed.",
+        &["Library/Caches/typescript", ".cache/typescript"],
+        210.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "Zig cache",
+        REBUILT,
+        &["Library/Caches/zig", ".cache/zig"],
+        35.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "Turborepo cache",
+        REBUILT,
+        &["Library/Caches/turbo", ".cache/turbo"],
+        330.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "NuGet packages",
+        AGAIN,
+        &[".nuget/packages"],
+        265.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "Haskell packages",
+        "Cabal and Stack downloads. Downloaded again when needed.",
+        &[".cabal/packages", ".stack/pantry"],
+        280.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "Ruby gem cache",
+        AGAIN,
+        &[".bundle/cache", ".gem/cache"],
+        355.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "Scala and Coursier",
+        AGAIN,
+        &["Library/Caches/Coursier", ".cache/coursier"],
+        5.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "Terraform plugins",
+        AGAIN,
+        &[".terraform.d/plugin-cache"],
+        260.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "Swift packages",
+        "Swift Package Manager and Carthage. Downloaded again when needed.",
+        &[
+            "Library/Caches/org.swift.swiftpm",
+            "Library/Caches/org.carthage.CarthageKit",
+        ],
+        20.0,
+        Source::Logo(Logo::Apple),
+        Pick::Dev,
+    ),
+    spec(
+        "Xcode previews",
+        REBUILT,
+        &["Library/Developer/Xcode/UserData/Previews"],
+        215.0,
+        XCODE,
+        Pick::Dev,
+    ),
+    spec(
+        "Android build cache",
+        REBUILT,
+        &[".android/cache", ".android/build-cache"],
+        145.0,
+        Source::Logo(Logo::Android),
+        Pick::Dev,
+    ),
+    spec(
+        "Kotlin Native",
+        AGAIN,
+        &[".konan/cache", ".konan/dependencies"],
+        285.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "vcpkg cache",
+        REBUILT,
+        &[".cache/vcpkg/archives", "Library/Caches/vcpkg"],
+        200.0,
+        Source::File,
+        Pick::Dev,
     ),
     spec(
         "PyTorch models",
@@ -414,7 +568,7 @@ const CACHES: &[Spec] = &[
         &[".cache/torch"],
         15.0,
         Source::Logo(Logo::Python),
-        false,
+        Pick::Off,
     ),
     spec(
         "Hugging Face models",
@@ -422,7 +576,7 @@ const CACHES: &[Spec] = &[
         &[".cache/huggingface"],
         50.0,
         Source::Logo(Logo::HuggingFace),
-        false,
+        Pick::Off,
     ),
     spec(
         "Ollama models",
@@ -430,7 +584,7 @@ const CACHES: &[Spec] = &[
         &[".ollama/models"],
         0.0,
         Source::App("com.electron.ollama", Some(Logo::Ollama)),
-        false,
+        Pick::Off,
     ),
     spec(
         "LM Studio models",
@@ -438,7 +592,7 @@ const CACHES: &[Spec] = &[
         &[".lmstudio/models"],
         260.0,
         Source::App("ai.elementlabs.lmstudio", None),
-        false,
+        Pick::Off,
     ),
     spec(
         "Trash",
@@ -450,7 +604,7 @@ const CACHES: &[Spec] = &[
         ],
         0.0,
         Source::File,
-        true,
+        Pick::On,
     ),
 ];
 
@@ -505,6 +659,13 @@ pub const EXTRA_ROOTS: &[&str] = &[
     ".ccache",
     ".config/Code",
     "Library/Application Support/Code",
+    ".nuget",
+    ".cabal",
+    ".stack",
+    ".bundle",
+    ".gem",
+    ".terraform.d",
+    ".konan",
 ];
 
 /// The category the scan counted `path` under: its deepest root's.
@@ -528,7 +689,7 @@ struct Found {
     /// Gives `Source::File` something to show.
     icon_file: Option<PathBuf>,
     category: Category,
-    on: bool,
+    pick: Pick,
     bytes: u64,
     how: How,
 }
@@ -557,7 +718,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
             icon: spec.icon,
             icon_file,
             category,
-            on: spec.on,
+            pick: spec.pick,
             bytes,
             how: How::Contents(paths, Vec::new()),
         });
@@ -581,7 +742,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         icon: Source::File,
         icon_file: Some(caches.clone()),
         category: Category::Caches,
-        on: true,
+        pick: Pick::On,
         bytes: index
             .size(&caches)
             .saturating_sub(skip.iter().map(|(_, b)| b).sum()),
@@ -636,7 +797,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
             icon,
             icon_file: None,
             category: Category::Developer,
-            on: true,
+            pick: Pick::On,
             bytes: clear.iter().map(|(_, b)| b).sum(),
             how: How::Worktrees(clear),
         });
@@ -650,7 +811,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         icon: Source::App("com.t3tools.t3code", Some(Logo::Git)),
         icon_file: None,
         category: Category::Developer,
-        on: false,
+        pick: Pick::Off,
         bytes: t3_backups.iter().map(|(_, b)| b).sum(),
         how: How::Paths(t3_backups),
     });
@@ -671,7 +832,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         icon: Source::Logo(Logo::Node),
         icon_file: None,
         category: Category::Developer,
-        on: false,
+        pick: Pick::Off,
         bytes: modules.iter().map(|(_, b)| b).sum(),
         how: How::Paths(modules),
     });
@@ -687,7 +848,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         icon: Source::Logo(Logo::Rust),
         icon_file: None,
         category: Category::Developer,
-        on: true,
+        pick: Pick::On,
         bytes: targets.iter().map(|(_, b)| b).sum(),
         how: How::Paths(targets),
     });
@@ -707,7 +868,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         icon: Source::Logo(Logo::Node),
         icon_file: None,
         category: Category::Developer,
-        on: true,
+        pick: Pick::On,
         bytes: web.iter().map(|(_, b)| b).sum(),
         how: How::Paths(web),
     });
@@ -722,7 +883,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         icon: Source::Logo(Logo::Python),
         icon_file: None,
         category: Category::Developer,
-        on: false,
+        pick: Pick::Off,
         bytes: venvs.iter().map(|(_, b)| b).sum(),
         how: How::Paths(venvs),
     });
@@ -742,7 +903,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         icon: SIMULATOR,
         icon_file: None,
         category: Category::Developer,
-        on: true,
+        pick: Pick::On,
         bytes: devices.iter().map(|(_, b)| b).sum(),
         how: How::Simulators(devices),
     });
@@ -762,7 +923,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         icon: Source::App("com.google.android.studio", Some(Logo::Android)),
         icon_file: None,
         category: Category::Developer,
-        on: false,
+        pick: Pick::Off,
         bytes: avds.iter().map(|(_, b)| b).sum(),
         how: How::Emulators(avds),
     });
@@ -787,12 +948,16 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         icon: Source::App("com.apple.backup.launcher", None),
         icon_file: None,
         category: Category::Documents,
-        on: false,
+        pick: Pick::Off,
         bytes: backups.iter().map(|(_, b)| b).sum(),
         how: How::Paths(backups),
     });
 
-    let installers = installers(&home.join("Downloads"));
+    let installers = if access::allowed(access::Folder::Downloads) {
+        installers(&home.join("Downloads"))
+    } else {
+        Vec::new()
+    };
     found.push(Found {
         name: "Installers".into(),
         detail: format!(
@@ -803,14 +968,20 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         icon: Source::File,
         icon_file: installers.first().map(|(p, _)| p.clone()),
         category: Category::Documents,
-        on: false,
+        pick: Pick::Off,
         bytes: installers.iter().map(|(_, b)| b).sum(),
         how: How::Paths(installers),
     });
 
     found.extend(docker());
+    found.extend(system_caches());
 
-    found.retain(|f| f.bytes >= MIN_BYTES);
+    // Developer caches are cleared together, so small ones are worth it too.
+    // System caches ask for a password, so they need to be worth that.
+    found.retain(|f| match (f.pick, &f.how) {
+        (Pick::Dev, How::Contents(..)) => f.bytes >= MIN_DEV_BYTES,
+        _ => f.bytes >= MIN_BYTES,
+    });
     found.sort_by_key(|f| std::cmp::Reverse(f.bytes));
     found
         .into_iter()
@@ -820,7 +991,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
             detail: f.detail,
             tone: Tone::Hue(f.hue),
             category: f.category,
-            on: f.on,
+            pick: f.pick,
             left: AtomicU64::new(f.bytes),
             how: f.how,
         })
@@ -1093,8 +1264,89 @@ fn run(how: &How, clear: &Clear) {
                 freed(*bytes);
             }
         }
+        How::System(command, dirs) => {
+            let size = || dirs.iter().map(|d| dir_size(d)).sum::<u64>();
+            let before = size();
+            progress.show(&dirs[0]);
+            let ran = Command::new(PKEXEC)
+                .args(*command)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if ran {
+                freed(before.saturating_sub(size()));
+            }
+        }
         How::Demo => {}
     }
+}
+
+const PKEXEC: &str = "/usr/bin/pkexec";
+
+/// Package managers' download caches outside home. Each package manager
+/// empties its own, so clearing never deletes system files itself.
+fn system_caches() -> Vec<Found> {
+    if cfg!(target_os = "macos") || !Path::new(PKEXEC).exists() {
+        return Vec::new();
+    }
+    let has = |p: &str| Path::new(p).exists();
+    let pacman: &'static [&'static str] = if has("/usr/bin/paccache") {
+        &["/usr/bin/paccache", "-rk0"]
+    } else {
+        &["/usr/bin/pacman", "-Sc", "--noconfirm"]
+    };
+    let managers: [(&str, &str, &[&str], &[&str]); 3] = [
+        (
+            "pacman",
+            "/usr/bin/pacman",
+            pacman,
+            &["/var/cache/pacman/pkg"],
+        ),
+        (
+            "apt",
+            "/usr/bin/apt-get",
+            &["/usr/bin/apt-get", "clean"],
+            &["/var/cache/apt/archives"],
+        ),
+        (
+            "dnf",
+            "/usr/bin/dnf",
+            &["/usr/bin/dnf", "clean", "packages"],
+            &["/var/cache/libdnf5", "/var/cache/dnf"],
+        ),
+    ];
+    managers
+        .into_iter()
+        .filter(|(_, binary, _, _)| has(binary))
+        .map(|(name, _, command, dirs)| {
+            let dirs: Vec<PathBuf> = dirs.iter().map(PathBuf::from).collect();
+            Found {
+                name: format!("{name} packages"),
+                detail: format!(
+                    "Downloaded packages. {name} empties it after you enter your password."
+                ),
+                hue: 200.0,
+                icon: Source::File,
+                icon_file: Some(dirs[0].clone()),
+                category: Category::System,
+                pick: Pick::Dev,
+                bytes: dirs.iter().map(|d| dir_size(d)).sum(),
+                how: How::System(command, dirs),
+            }
+        })
+        .collect()
+}
+
+/// Disk use of what's readable under `path`, counted like the scan.
+fn dir_size(path: &Path) -> u64 {
+    let Ok(md) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !md.is_dir() {
+        return md.blocks() * 512 / md.nlink().max(1);
+    }
+    fs::read_dir(path).map_or(0, |entries| {
+        entries.flatten().map(|e| dir_size(&e.path())).sum()
+    })
 }
 
 /// Docker's build cache and unused images, as `docker system df` reports
@@ -1135,7 +1387,7 @@ fn docker() -> Vec<Found> {
             icon: Source::App("com.docker.docker", None),
             icon_file: None,
             category: Category::System,
-            on: true,
+            pick: Pick::Dev,
             bytes: cache,
             how: How::Docker(docker.clone(), &["builder", "prune", "-af"], cache),
         },
@@ -1146,7 +1398,7 @@ fn docker() -> Vec<Found> {
             icon: Source::App("com.docker.docker", None),
             icon_file: None,
             category: Category::System,
-            on: false,
+            pick: Pick::Off,
             bytes: images,
             how: How::Docker(docker, &["image", "prune", "-af"], images),
         },
@@ -1226,7 +1478,7 @@ fn remove_all(path: &Path, dev: u64, clear: &Clear) {
 
 /// Sample items for `--demo`, sized like a busy developer Mac.
 pub fn demo() -> Vec<Item> {
-    let item = |name: &str, detail: &str, gb: f64, hue: f32, icon: Source, on: bool| Item {
+    let item = |name: &str, detail: &str, gb: f64, hue: f32, icon: Source, pick: Pick| Item {
         category: if name == "Chrome cache" {
             Category::Caches
         } else {
@@ -1236,7 +1488,7 @@ pub fn demo() -> Vec<Item> {
         detail: detail.into(),
         tone: Tone::Hue(hue),
         icon: icons::load(icon, None),
-        on,
+        pick,
         left: AtomicU64::new((gb * 1e9) as u64),
         how: How::Demo,
     };
@@ -1247,7 +1499,7 @@ pub fn demo() -> Vec<Item> {
             48.5,
             225.0,
             SIMULATOR,
-            true,
+            Pick::On,
         ),
         item(
             "T3 Code worktrees",
@@ -1255,7 +1507,7 @@ pub fn demo() -> Vec<Item> {
             21.2,
             15.0,
             Source::App("com.t3tools.t3code", Some(Logo::Git)),
-            true,
+            Pick::On,
         ),
         item(
             "node_modules",
@@ -1263,7 +1515,7 @@ pub fn demo() -> Vec<Item> {
             21.5,
             100.0,
             Source::Logo(Logo::Node),
-            false,
+            Pick::Off,
         ),
         item(
             "Chrome cache",
@@ -1271,16 +1523,16 @@ pub fn demo() -> Vec<Item> {
             8.9,
             220.0,
             Source::App("com.google.Chrome", None),
-            true,
+            Pick::On,
         ),
-        item("Xcode build data", REBUILT, 8.2, 215.0, XCODE, true),
+        item("Xcode build data", REBUILT, 8.2, 215.0, XCODE, Pick::Dev),
         item(
             "pnpm store",
             AGAIN,
             6.2,
             45.0,
             Source::Logo(Logo::Pnpm),
-            true,
+            Pick::Dev,
         ),
         item(
             "Android emulators",
@@ -1288,7 +1540,7 @@ pub fn demo() -> Vec<Item> {
             5.2,
             145.0,
             Source::Logo(Logo::Android),
-            false,
+            Pick::Off,
         ),
         item(
             "Gradle",
@@ -1296,7 +1548,7 @@ pub fn demo() -> Vec<Item> {
             4.5,
             195.0,
             Source::Logo(Logo::Gradle),
-            true,
+            Pick::Dev,
         ),
         item(
             "Go modules",
@@ -1304,7 +1556,7 @@ pub fn demo() -> Vec<Item> {
             3.5,
             190.0,
             Source::Logo(Logo::Go),
-            true,
+            Pick::Dev,
         ),
         item(
             "Capy worktrees",
@@ -1312,16 +1564,23 @@ pub fn demo() -> Vec<Item> {
             2.5,
             15.0,
             Source::Logo(Logo::Git),
-            true,
+            Pick::On,
         ),
-        item("bun cache", AGAIN, 2.0, 70.0, Source::Logo(Logo::Bun), true),
+        item(
+            "bun cache",
+            AGAIN,
+            2.0,
+            70.0,
+            Source::Logo(Logo::Bun),
+            Pick::Dev,
+        ),
         item(
             "Old backups",
             "2 folders: site-backup, db.old.",
             1.8,
             265.0,
             Source::App("com.apple.backup.launcher", None),
-            false,
+            Pick::Off,
         ),
         item(
             "CocoaPods",
@@ -1329,9 +1588,32 @@ pub fn demo() -> Vec<Item> {
             0.9,
             15.0,
             Source::Logo(Logo::CocoaPods),
-            true,
+            Pick::Dev,
         ),
-        item("npm cache", AGAIN, 0.7, 25.0, Source::Logo(Logo::Npm), true),
+        item(
+            "npm cache",
+            AGAIN,
+            0.7,
+            25.0,
+            Source::Logo(Logo::Npm),
+            Pick::Dev,
+        ),
+        item(
+            "uv cache",
+            AGAIN,
+            3.1,
+            300.0,
+            Source::Logo(Logo::Uv),
+            Pick::Dev,
+        ),
+        item(
+            "Homebrew downloads",
+            AGAIN,
+            1.4,
+            50.0,
+            Source::Logo(Logo::HomeBrew),
+            Pick::Dev,
+        ),
     ]
 }
 

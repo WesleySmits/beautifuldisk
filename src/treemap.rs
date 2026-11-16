@@ -123,6 +123,9 @@ pub struct Tile {
     pub reveal: f32,
     /// Being cleared: the dots shimmer.
     pub busy: bool,
+    /// Share of the width, from the left, kept free of dots so text there
+    /// stays readable. The dots fade in after it.
+    pub clear: f32,
 }
 
 const BAYER: [f32; 16] = [
@@ -179,10 +182,19 @@ pub fn paint(
         }
         for col in first_col..=last_col {
             let u = ((col as f32 * CELL - gx) / w).clamp(0.0, 1.0);
+            let fade = if tile.clear > 0.0 {
+                ((u - tile.clear) / 0.2).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            if fade <= 0.0 {
+                continue;
+            }
             let threshold = (BAYER[((row & 3) * 4 + (col & 3)) as usize] + 0.5) / 16.0;
             let color = if tile.on {
                 // Sparse at the top where the label sits, dense at the bottom.
-                let mut density = (0.1 + 0.82 * v.powf(1.3) * (0.6 + 0.4 * u)) * (0.6 + 0.4 * glow);
+                let mut density =
+                    (0.1 + 0.82 * v.powf(1.3) * (0.6 + 0.4 * u)) * (0.6 + 0.4 * glow) * fade;
                 if tile.busy && hash01(col, row + flicker * 131) < 0.25 {
                     density += 0.5;
                 }
@@ -195,7 +207,7 @@ pub fn paint(
                     0.55 + 0.45 * glow,
                 )
             } else {
-                if (col + row) % 4 != 0 {
+                if (col + row) % 4 != 0 || hash01(col, row) > fade {
                     continue;
                 }
                 alpha(Rgba::WHITE, 0.13 + 0.1 * glow)

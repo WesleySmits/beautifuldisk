@@ -10,15 +10,16 @@ libc = "0.2.191"
 rayon = "1.12.0"
 rodio = { version = "0.23.0", default-features = false, features = ["playback"] }
 
-# Finder icons and FSEvents.
+# Finder icons, FSEvents and the Full Disk Access helper.
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "0.3.1"
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "objc2-core-graphics"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "objc2-core-graphics", "NSApplication", "NSResponder", "NSEvent", "NSView", "NSWindow", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSPasteboard", "NSRunningApplication", "NSScreen", "NSGraphics"] }
 objc2-core-foundation = { version = "0.3.2", features = ["CFArray", "CFString"] }
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGImage"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGImage", "CGWindow"] }
 objc2-core-services = { version = "0.3.2", default-features = false, features = ["std", "libc", "FSEvents", "dispatch2"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSData", "NSDictionary", "NSGeometry", "NSURL"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSData", "NSDictionary", "NSGeometry", "NSURL", "NSArray", "NSValue", "NSEnumerator"] }
+raw-window-handle = "0.6.2"
 
 # GPUI is slow unoptimized; optimize dependencies so debug builds animate smoothly.
 [profile.dev.package."*"]

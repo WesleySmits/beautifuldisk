@@ -1,3 +1,4 @@
+mod access;
 mod bar;
 mod bulk;
 mod card;
@@ -5,6 +6,8 @@ mod clutter;
 mod disk;
 #[cfg(target_os = "macos")]
 mod fsevents;
+#[cfg(target_os = "macos")]
+mod grant;
 /// Linux has no change journal that outlives the app, so every scan is full.
 #[cfg(not(target_os = "macos"))]
 mod fsevents {
@@ -33,20 +36,32 @@ use gpui_kit::*;
 
 actions!(beautifuldisk, [Quit]);
 
-assets::icon_assets!(
-    ExtraIcons,
-    [
-        AppWindow,
-        SquareTerminal,
-        Image,
-        Film,
-        FileText,
-        Music,
-        Settings,
-        Package,
-        Trash,
-        RefreshCw
-    ]
+assets::icon_assets!(ExtraIcons, [RefreshCw]);
+
+/// The app's own two-layer icons from `assets/icons`, served as
+/// `icons/<name>.base.svg` and `icons/<name>.accent.svg`.
+macro_rules! duo_icons {
+    ($($name:literal),* $(,)?) => {
+        &[$(
+            (concat!("icons/", $name, ".base.svg"), include_bytes!(concat!("../assets/icons/", $name, ".base.svg"))),
+            (concat!("icons/", $name, ".accent.svg"), include_bytes!(concat!("../assets/icons/", $name, ".accent.svg"))),
+        )*]
+    };
+}
+
+const DUO_ICONS: &[(&str, &[u8])] = duo_icons!(
+    "apps",
+    "developer",
+    "photos",
+    "movies",
+    "documents",
+    "music",
+    "system",
+    "caches",
+    "trash",
+    "desktop",
+    "downloads",
+    "full-disk",
 );
 
 /// Component icons plus the handful this app uses.
@@ -54,6 +69,9 @@ struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some((_, bytes)) = DUO_ICONS.iter().find(|(p, _)| *p == path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -63,6 +81,12 @@ impl AssetSource for AppAssets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = assets::Assets.list(path)?;
         paths.extend(ExtraIcons.list(path)?);
+        paths.extend(
+            DUO_ICONS
+                .iter()
+                .filter(|(p, _)| p.starts_with(path))
+                .map(|(p, _)| SharedString::from(*p)),
+        );
         paths.sort();
         paths.dedup();
         Ok(paths)
@@ -117,7 +141,7 @@ fn main() {
             ..Default::default()
         };
         open_window(options, cx, |_, cx| {
-            cx.new(|_| card::Card::new(demo, autoplay))
+            cx.new(|cx| card::Card::new(demo, autoplay, cx))
         })
         .expect("failed to open window");
         cx.activate(true);
