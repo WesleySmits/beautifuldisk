@@ -567,7 +567,11 @@ impl Children {
 const MAGIC: &[u8; 8] = b"BDSKTRE1";
 
 fn cache_path(home: &Path) -> PathBuf {
-    home.join("Library/Application Support/beautifuldisk/tree.bin")
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/beautifuldisk/tree.bin")
+    } else {
+        home.join(".cache/beautifuldisk/tree.bin")
+    }
 }
 
 impl Tree {

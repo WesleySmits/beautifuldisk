@@ -1,12 +1,15 @@
 //! Icons for cleanup items: the real macOS icon of an app or file when there
-//! is one, else the tool's logo.
+//! is one, else the tool's logo. Linux always uses the logo.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use gpui_kit::{Image, ImageFormat};
+#[cfg(target_os = "macos")]
 use objc2::AnyThread;
+#[cfg(target_os = "macos")]
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSWorkspace};
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
 /// Tool logos (Simple Icons, recolored to each brand).
@@ -87,6 +90,7 @@ fn svg(logo: Logo) -> Image {
     Image::from_bytes(ImageFormat::Svg, logo.svg().to_vec())
 }
 
+#[cfg(target_os = "macos")]
 fn app_icon(bundle: &str) -> Option<Image> {
     let url = NSWorkspace::sharedWorkspace()
         .URLForApplicationWithBundleIdentifier(&NSString::from_str(bundle))?;
@@ -94,6 +98,7 @@ fn app_icon(bundle: &str) -> Option<Image> {
 }
 
 /// Finder's icon for `path`, rendered to a PNG big enough for a 2x screen.
+#[cfg(target_os = "macos")]
 fn file_icon(path: &str) -> Option<Image> {
     if !Path::new(path).exists() {
         return None;
@@ -106,4 +111,14 @@ fn file_icon(path: &str) -> Option<Image> {
         rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
     }?;
     Some(Image::from_bytes(ImageFormat::Png, data.to_vec()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn app_icon(_bundle: &str) -> Option<Image> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn file_icon(_path: &str) -> Option<Image> {
+    None
 }

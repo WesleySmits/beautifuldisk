@@ -62,15 +62,15 @@ pub struct Volume {
 
 pub fn volume() -> Volume {
     let path = CString::new("/").unwrap();
-    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(path.as_ptr(), &mut stat) } != 0 {
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
         return Volume { total: 0, used: 0 };
     }
-    let block = stat.f_bsize as u64;
-    let total = stat.f_blocks * block;
+    let block = stat.f_frsize as u64;
+    let total = stat.f_blocks as u64 * block;
     Volume {
         total,
-        used: total.saturating_sub(stat.f_bavail * block),
+        used: total.saturating_sub(stat.f_bavail as u64 * block),
     }
 }
 
@@ -156,6 +156,10 @@ impl Progress {
         self.done.store(true, Relaxed);
     }
 
+    pub(crate) fn set_system(&self, bytes: u64) {
+        self.bytes[Category::System as usize].store(bytes, Relaxed);
+    }
+
     pub(crate) fn remove(&self, category: Category, bytes: u64) {
         let _ = self.bytes[category as usize]
             .fetch_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(bytes)));
@@ -188,6 +192,7 @@ pub fn home() -> PathBuf {
 /// Where each category lives. System data is whatever the disk uses beyond these.
 pub(crate) fn roots(home: &Path) -> Vec<(PathBuf, Category)> {
     let h = |p: &str| home.join(p);
+    #[cfg(target_os = "macos")]
     let mut roots = vec![
         ("/Applications".into(), Category::Apps),
         (h("Applications"), Category::Apps),
@@ -201,6 +206,23 @@ pub(crate) fn roots(home: &Path) -> Vec<(PathBuf, Category)> {
         (h("Library/Caches"), Category::Caches),
         (h(".Trash"), Category::Trash),
     ];
+    // Installed software lives in /usr and /opt plus Flatpak and Snap.
+    #[cfg(not(target_os = "macos"))]
+    let mut roots = vec![
+        ("/usr".into(), Category::Apps),
+        ("/opt".into(), Category::Apps),
+        ("/var/lib/flatpak".into(), Category::Apps),
+        ("/snap".into(), Category::Apps),
+        (h(".local/share/flatpak"), Category::Apps),
+        (h("Pictures"), Category::Photos),
+        (h("Videos"), Category::Movies),
+        (h("Documents"), Category::Documents),
+        (h("Desktop"), Category::Documents),
+        (h("Downloads"), Category::Documents),
+        (h("Music"), Category::Music),
+        (h(".cache"), Category::Caches),
+        (h(".local/share/Trash"), Category::Trash),
+    ];
     for dev in clutter::EXTRA_ROOTS.iter().copied().chain([
         "Developer",
         "Projects",
@@ -213,7 +235,11 @@ pub(crate) fn roots(home: &Path) -> Vec<(PathBuf, Category)> {
         ".cocoapods",
         "Library/pnpm",
     ]) {
-        roots.push((h(dev), Category::Developer));
+        let path = h(dev);
+        // ~/.cache is already the Caches root on Linux.
+        if roots.iter().all(|(root, _)| *root != path) {
+            roots.push((path, Category::Developer));
+        }
     }
     roots
 }

@@ -277,7 +277,9 @@ impl Card {
         let working = self.phase != Phase::Idle;
         if working {
             for c in Category::ALL {
-                if c != Category::System {
+                // System data is worked out when the scan ends; after that only
+                // clearing (Docker) changes it.
+                if c != Category::System || self.phase == Phase::Clearing {
                     self.target[c as usize] = self.progress.bytes(c) as f64;
                 }
             }
@@ -288,8 +290,9 @@ impl Card {
                 Phase::Scanning => {
                     self.report = self.progress.report();
                     let known: f64 = self.target.iter().sum();
-                    self.target[Category::System as usize] =
-                        (self.volume.used as f64 - known).max(0.0);
+                    let system = (self.volume.used as f64 - known).max(0.0);
+                    self.target[Category::System as usize] = system;
+                    self.progress.set_system(system as u64);
                     self.phase = Phase::Idle;
                 }
                 Phase::Clearing => {
@@ -605,7 +608,11 @@ impl Card {
             Category::Photos | Category::Movies | Category::Documents | Category::Music => {
                 largest_file()
             }
-            Category::System => Some("macOS, app data and files outside your folders.".into()),
+            Category::System => Some(if cfg!(target_os = "macos") {
+                "macOS, app data and files outside your folders.".into()
+            } else {
+                "The system, app data and files outside your folders.".into()
+            }),
             Category::Caches => Some("Apps rebuild these when they need them again.".into()),
             Category::Trash => Some("Things you've already deleted.".into()),
         }

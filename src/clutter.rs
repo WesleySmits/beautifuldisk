@@ -13,7 +13,7 @@ use dither_gpui::dither_core::Tone;
 use gpui_kit::Image;
 use rayon::prelude::*;
 
-use crate::disk::{Category, Progress};
+use crate::disk::{self, Category, Progress};
 use crate::icons::{self, Logo, Source};
 use crate::tree::{self, Index};
 
@@ -46,6 +46,9 @@ enum How {
     Simulators(Vec<(PathBuf, u64)>),
     /// Android virtual devices: the .avd folder and its .ini.
     Emulators(Vec<(PathBuf, u64)>),
+    /// A command for the `docker` binary at this path that frees about this
+    /// many bytes.
+    Docker(PathBuf, &'static [&'static str], u64),
     /// Sample data for `--demo`.
     Demo,
 }
@@ -151,6 +154,7 @@ const CACHES: &[Spec] = &[
             "Library/pnpm/store",
             ".local/share/pnpm/store",
             "Library/Caches/pnpm",
+            ".cache/pnpm",
         ],
         45.0,
         Source::Logo(Logo::Pnpm),
@@ -175,7 +179,7 @@ const CACHES: &[Spec] = &[
     spec(
         "Yarn cache",
         AGAIN,
-        &["Library/Caches/Yarn", ".yarn/berry/cache"],
+        &["Library/Caches/Yarn", ".yarn/berry/cache", ".cache/yarn"],
         200.0,
         Source::Logo(Logo::Yarn),
         true,
@@ -183,7 +187,7 @@ const CACHES: &[Spec] = &[
     spec(
         "Go modules",
         AGAIN,
-        &["go/pkg/mod", "Library/Caches/go-build"],
+        &["go/pkg/mod", "Library/Caches/go-build", ".cache/go-build"],
         190.0,
         Source::Logo(Logo::Go),
         true,
@@ -211,7 +215,7 @@ const CACHES: &[Spec] = &[
     spec(
         "pip cache",
         AGAIN,
-        &["Library/Caches/pip"],
+        &["Library/Caches/pip", ".cache/pip"],
         55.0,
         Source::Logo(Logo::Python),
         true,
@@ -219,7 +223,7 @@ const CACHES: &[Spec] = &[
     spec(
         "Homebrew downloads",
         AGAIN,
-        &["Library/Caches/Homebrew"],
+        &["Library/Caches/Homebrew", ".cache/Homebrew"],
         50.0,
         Source::Logo(Logo::HomeBrew),
         true,
@@ -235,7 +239,7 @@ const CACHES: &[Spec] = &[
     spec(
         "Playwright browsers",
         AGAIN,
-        &["Library/Caches/ms-playwright"],
+        &["Library/Caches/ms-playwright", ".cache/ms-playwright"],
         140.0,
         Source::File,
         true,
@@ -243,7 +247,11 @@ const CACHES: &[Spec] = &[
     spec(
         "Chrome cache",
         AGAIN,
-        &["Library/Caches/Google/Chrome"],
+        &[
+            "Library/Caches/Google/Chrome",
+            ".cache/google-chrome",
+            ".cache/chromium",
+        ],
         220.0,
         Source::App("com.google.Chrome", None),
         true,
@@ -259,7 +267,7 @@ const CACHES: &[Spec] = &[
     spec(
         "Brave cache",
         AGAIN,
-        &["Library/Caches/BraveSoftware"],
+        &["Library/Caches/BraveSoftware", ".cache/BraveSoftware"],
         20.0,
         Source::App("com.brave.Browser", None),
         true,
@@ -267,7 +275,7 @@ const CACHES: &[Spec] = &[
     spec(
         "Firefox cache",
         AGAIN,
-        &["Library/Caches/Firefox"],
+        &["Library/Caches/Firefox", ".cache/mozilla"],
         30.0,
         Source::App("org.mozilla.firefox", None),
         true,
@@ -279,6 +287,134 @@ const CACHES: &[Spec] = &[
         205.0,
         Source::App("com.apple.Safari", None),
         true,
+    ),
+    spec(
+        "Maven",
+        "Downloaded again when needed. Holds what you installed locally too.",
+        &[".m2/repository"],
+        10.0,
+        Source::File,
+        false,
+    ),
+    spec(
+        "Deno cache",
+        AGAIN,
+        &["Library/Caches/deno", ".cache/deno"],
+        170.0,
+        Source::File,
+        true,
+    ),
+    spec(
+        "Composer cache",
+        AGAIN,
+        &[
+            "Library/Caches/composer",
+            ".cache/composer",
+            ".composer/cache",
+        ],
+        240.0,
+        Source::File,
+        true,
+    ),
+    spec(
+        "Dart and Flutter packages",
+        AGAIN,
+        &[".pub-cache"],
+        200.0,
+        Source::File,
+        true,
+    ),
+    spec(
+        "Bazel cache",
+        REBUILT,
+        &[".cache/bazel"],
+        120.0,
+        Source::File,
+        true,
+    ),
+    spec(
+        "Compiler caches",
+        "ccache and sccache. Rebuilt on the next build.",
+        &[
+            ".ccache",
+            ".cache/ccache",
+            "Library/Caches/ccache",
+            ".cache/sccache",
+            "Library/Caches/Mozilla.sccache",
+        ],
+        30.0,
+        Source::File,
+        true,
+    ),
+    spec(
+        "node-gyp headers",
+        AGAIN,
+        &[".cache/node-gyp", "Library/Caches/node-gyp"],
+        95.0,
+        Source::Logo(Logo::Node),
+        true,
+    ),
+    spec(
+        "Test browsers",
+        "Cypress and Puppeteer. Downloaded again when needed.",
+        &[
+            ".cache/Cypress",
+            "Library/Caches/Cypress",
+            ".cache/puppeteer",
+        ],
+        150.0,
+        Source::File,
+        true,
+    ),
+    spec(
+        "Electron downloads",
+        AGAIN,
+        &[
+            ".cache/electron",
+            "Library/Caches/electron",
+            ".cache/electron-builder",
+            "Library/Caches/electron-builder",
+        ],
+        200.0,
+        Source::File,
+        true,
+    ),
+    spec(
+        "pre-commit hooks",
+        AGAIN,
+        &[".cache/pre-commit"],
+        60.0,
+        Source::Logo(Logo::Python),
+        true,
+    ),
+    spec(
+        "JetBrains caches",
+        "Indexes and caches. Rebuilt when you open a project.",
+        &[".cache/JetBrains", "Library/Caches/JetBrains"],
+        320.0,
+        Source::File,
+        true,
+    ),
+    spec(
+        "VS Code caches",
+        AGAIN,
+        &[
+            "Library/Application Support/Code/CachedData",
+            "Library/Application Support/Code/CachedExtensionVSIXs",
+            ".config/Code/CachedData",
+            ".config/Code/CachedExtensionVSIXs",
+        ],
+        210.0,
+        Source::App("com.microsoft.VSCode", None),
+        true,
+    ),
+    spec(
+        "PyTorch models",
+        "Models you downloaded.",
+        &[".cache/torch"],
+        15.0,
+        Source::Logo(Logo::Python),
+        false,
     ),
     spec(
         "Hugging Face models",
@@ -307,7 +443,11 @@ const CACHES: &[Spec] = &[
     spec(
         "Trash",
         "Things you already deleted.",
-        &[".Trash"],
+        &[
+            ".Trash",
+            ".local/share/Trash/files",
+            ".local/share/Trash/info",
+        ],
         0.0,
         Source::File,
         true,
@@ -360,16 +500,20 @@ pub const EXTRA_ROOTS: &[&str] = &[
     ".lmstudio",
     ".yarn",
     ".local/share/pnpm",
+    ".pub-cache",
+    ".composer",
+    ".ccache",
+    ".config/Code",
+    "Library/Application Support/Code",
 ];
 
-fn category_of(home: &Path, path: &Path) -> Category {
-    if path.starts_with(home.join("Library/Caches")) {
-        Category::Caches
-    } else if path.starts_with(home.join(".Trash")) {
-        Category::Trash
-    } else {
-        Category::Developer
-    }
+/// The category the scan counted `path` under: its deepest root's.
+fn category_of(roots: &[(PathBuf, Category)], path: &Path) -> Category {
+    roots
+        .iter()
+        .filter(|(root, _)| path.starts_with(root))
+        .max_by_key(|(root, _)| root.components().count())
+        .map_or(Category::System, |(_, category)| *category)
 }
 
 fn count(n: usize, one: &str, many: &str) -> String {
@@ -393,26 +537,38 @@ struct Found {
 pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
     let mut found = Vec::new();
     let mut claimed = Vec::new();
+    let roots = disk::roots(home);
 
     for spec in CACHES {
         let paths: Vec<PathBuf> = spec.paths.iter().map(|p| home.join(p)).collect();
         let bytes = paths.iter().map(|p| index.size(p)).sum();
+        // Specs list paths for both systems; categorize by the one in use.
+        let main = paths
+            .iter()
+            .find(|p| index.size(p) > 0)
+            .unwrap_or(&paths[0]);
+        let category = category_of(&roots, main);
+        let icon_file = Some(main.clone());
         claimed.extend(paths.iter().cloned());
         found.push(Found {
             name: spec.name.into(),
             detail: spec.detail.into(),
             hue: spec.hue,
             icon: spec.icon,
-            icon_file: paths.first().cloned(),
-            category: category_of(home, &paths[0]),
+            icon_file,
+            category,
             on: spec.on,
             bytes,
             how: How::Contents(paths, Vec::new()),
         });
     }
 
-    // Everything else in ~/Library/Caches, minus what the specs above cover.
-    let caches = home.join("Library/Caches");
+    // Everything else in the user cache folder, minus what the specs above cover.
+    let caches = home.join(if cfg!(target_os = "macos") {
+        "Library/Caches"
+    } else {
+        ".cache"
+    });
     let skip: Vec<_> = index
         .subdirs(&caches)
         .into_iter()
@@ -535,6 +691,41 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         bytes: targets.iter().map(|(_, b)| b).sum(),
         how: How::Paths(targets),
     });
+    let web = outside_worktrees(index.search(&projects, |name, _, _| {
+        matches!(
+            name,
+            b".next" | b".turbo" | b".nuxt" | b".svelte-kit" | b".parcel-cache"
+        )
+    }));
+    found.push(Found {
+        name: "Web build caches".into(),
+        detail: format!(
+            "{}: .next, .turbo and similar. {REBUILT}",
+            count(web.len(), "folder", "folders")
+        ),
+        hue: 250.0,
+        icon: Source::Logo(Logo::Node),
+        icon_file: None,
+        category: Category::Developer,
+        on: true,
+        bytes: web.iter().map(|(_, b)| b).sum(),
+        how: How::Paths(web),
+    });
+    let venvs = outside_worktrees(index.search(&projects, |name, _, _| name == b".venv"));
+    found.push(Found {
+        name: "Python environments".into(),
+        detail: format!(
+            "{}. Reinstalled from your project's requirements.",
+            count(venvs.len(), ".venv folder", ".venv folders")
+        ),
+        hue: 55.0,
+        icon: Source::Logo(Logo::Python),
+        icon_file: None,
+        category: Category::Developer,
+        on: false,
+        bytes: venvs.iter().map(|(_, b)| b).sum(),
+        how: How::Paths(venvs),
+    });
 
     let devices: Vec<_> = index
         .subdirs(&home.join("Library/Developer/CoreSimulator/Devices"))
@@ -606,11 +797,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         name: "Installers".into(),
         detail: format!(
             "{} in Downloads.",
-            count(
-                installers.len(),
-                "disk image or package",
-                "disk images and packages"
-            )
+            count(installers.len(), "installer", "installers")
         ),
         hue: 185.0,
         icon: Source::File,
@@ -620,6 +807,8 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         bytes: installers.iter().map(|(_, b)| b).sum(),
         how: How::Paths(installers),
     });
+
+    found.extend(docker());
 
     found.retain(|f| f.bytes >= MIN_BYTES);
     found.sort_by_key(|f| std::cmp::Reverse(f.bytes));
@@ -701,9 +890,18 @@ fn installers(downloads: &Path) -> Vec<(PathBuf, u64)> {
         .flatten()
         .filter(|e| {
             let name = e.file_name().to_string_lossy().to_lowercase();
-            [".dmg", ".pkg", ".iso", ".xip", ".ipsw"]
-                .iter()
-                .any(|ext| name.ends_with(ext))
+            [
+                ".dmg",
+                ".pkg",
+                ".iso",
+                ".xip",
+                ".ipsw",
+                ".deb",
+                ".rpm",
+                ".appimage",
+            ]
+            .iter()
+            .any(|ext| name.ends_with(ext))
         })
         .filter_map(|e| {
             let md = e.metadata().ok()?;
@@ -815,7 +1013,115 @@ fn run(how: &How, progress: &Progress, freed: &(dyn Fn(u64) + Sync)) {
                 let _ = fs::remove_file(avd.with_extension("ini"));
             }
         }
+        How::Docker(docker, args, bytes) => {
+            progress.show(docker);
+            let ok = Command::new(docker)
+                .args(*args)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if ok {
+                freed(*bytes);
+            }
+        }
         How::Demo => {}
+    }
+}
+
+/// Docker's build cache and unused images, as `docker system df` reports
+/// them. Volumes and containers are never touched.
+fn docker() -> Vec<Found> {
+    // Apps opened from Finder don't get the shell's PATH.
+    let Some(docker) = [
+        "/usr/bin/docker",
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+        "/Applications/Docker.app/Contents/Resources/bin/docker",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|p| p.exists()) else {
+        return Vec::new();
+    };
+    let Some(out) = run_for(
+        Command::new(&docker).args(["system", "df", "--format", "{{.Type}}\t{{.Reclaimable}}"]),
+        Duration::from_secs(5),
+    ) else {
+        return Vec::new();
+    };
+    let reclaimable = |kind: &str| {
+        out.lines()
+            .find_map(|line| line.strip_prefix(kind)?.strip_prefix('\t'))
+            .and_then(|r| r.split_whitespace().next())
+            .and_then(docker_bytes)
+            .unwrap_or(0)
+    };
+    let cache = reclaimable("Build Cache");
+    let images = reclaimable("Images");
+    vec![
+        Found {
+            name: "Docker build cache".into(),
+            detail: REBUILT.into(),
+            hue: 205.0,
+            icon: Source::App("com.docker.docker", None),
+            icon_file: None,
+            category: Category::System,
+            on: true,
+            bytes: cache,
+            how: How::Docker(docker.clone(), &["builder", "prune", "-af"], cache),
+        },
+        Found {
+            name: "Docker images".into(),
+            detail: "Images no container uses. Pulled again when needed.".into(),
+            hue: 210.0,
+            icon: Source::App("com.docker.docker", None),
+            icon_file: None,
+            category: Category::System,
+            on: false,
+            bytes: images,
+            how: How::Docker(docker, &["image", "prune", "-af"], images),
+        },
+    ]
+}
+
+/// Docker's sizes, like "1.25GB" or "512kB" (powers of 1000).
+fn docker_bytes(size: &str) -> Option<u64> {
+    let split = size.find(|c: char| c.is_ascii_alphabetic())?;
+    let (number, unit) = size.split_at(split);
+    let scale = match unit {
+        "B" => 1e0,
+        "kB" | "KB" => 1e3,
+        "MB" => 1e6,
+        "GB" => 1e9,
+        "TB" => 1e12,
+        _ => return None,
+    };
+    Some((number.parse::<f64>().ok()? * scale) as u64)
+}
+
+/// Stdout of a command that succeeded within `limit`. A stopped Docker
+/// daemon can hang the CLI, and detection must not wait on it.
+fn run_for(command: &mut Command, limit: Duration) -> Option<String> {
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().ok()? {
+            if !status.success() {
+                return None;
+            }
+            let mut out = String::new();
+            std::io::Read::read_to_string(child.stdout.as_mut()?, &mut out).ok()?;
+            return Some(out);
+        }
+        if start.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -971,6 +1277,14 @@ fn demo_clean(item: &Item, freed: &dyn Fn(u64)) {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn reads_docker_sizes() {
+        assert_eq!(docker_bytes("1.25GB"), Some(1_250_000_000));
+        assert_eq!(docker_bytes("512kB"), Some(512_000));
+        assert_eq!(docker_bytes("0B"), Some(0));
+        assert_eq!(docker_bytes("12%"), None);
+    }
 
     #[test]
     fn items_clear_at_the_same_time() {

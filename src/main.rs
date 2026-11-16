@@ -3,7 +3,24 @@ mod bulk;
 mod card;
 mod clutter;
 mod disk;
+#[cfg(target_os = "macos")]
 mod fsevents;
+/// Linux has no change journal that outlives the app, so every scan is full.
+#[cfg(not(target_os = "macos"))]
+mod fsevents {
+    pub struct Change {
+        pub path: std::path::PathBuf,
+        pub recursive: bool,
+    }
+
+    pub fn current_id() -> u64 {
+        0
+    }
+
+    pub fn changes_since(_since: u64, _roots: &[std::path::PathBuf]) -> Option<Vec<Change>> {
+        None
+    }
+}
 mod icons;
 mod sound;
 mod tree;

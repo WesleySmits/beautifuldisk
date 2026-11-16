@@ -1,9 +1,13 @@
-//! Directory listing with macOS `getattrlistbulk(2)`: one syscall returns
-//! names, types and sizes for a whole batch of entries, instead of one
-//! `readdir` plus one `lstat` per entry.
+//! Directory listing. On macOS `getattrlistbulk(2)` returns names, types and
+//! sizes for a whole batch of entries in one syscall, instead of one
+//! `readdir` plus one `lstat` per entry. Linux has no such call, so it reads
+//! names with `readdir` and sizes with `fstatat` relative to the open folder.
 
+#[cfg(target_os = "macos")]
 use std::cell::RefCell;
-use std::ffi::{CString, OsStr, c_void};
+#[cfg(target_os = "macos")]
+use std::ffi::c_void;
+use std::ffi::{CString, OsStr};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -28,12 +32,17 @@ pub struct Entry<'a> {
 }
 
 // `vtype` values from <sys/vnode.h>.
+#[cfg(target_os = "macos")]
 const VREG: u32 = 1;
+#[cfg(target_os = "macos")]
 const VDIR: u32 = 2;
+#[cfg(target_os = "macos")]
 const VLNK: u32 = 5;
 
+#[cfg(target_os = "macos")]
 const BUF_SIZE: usize = 256 * 1024;
 
+#[cfg(target_os = "macos")]
 thread_local! {
     static BUF: RefCell<Vec<u8>> = RefCell::new(vec![0; BUF_SIZE]);
 }
@@ -78,10 +87,12 @@ impl Drop for Dir {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn u32_at(buf: &[u8], at: usize) -> u32 {
     u32::from_ne_bytes(buf[at..at + 4].try_into().unwrap())
 }
 
+#[cfg(target_os = "macos")]
 fn u64_at(buf: &[u8], at: usize) -> u64 {
     u64::from_ne_bytes(buf[at..at + 8].try_into().unwrap())
 }
@@ -116,6 +127,7 @@ impl Dir {
     }
 
     /// Calls `f` for every entry.
+    #[cfg(target_os = "macos")]
     pub fn read(&self, mut f: impl FnMut(Entry)) -> io::Result<()> {
         let mut attrs = libc::attrlist {
             bitmapcount: libc::ATTR_BIT_MAP_COUNT,
@@ -183,5 +195,59 @@ impl Dir {
                 }
             }
         })
+    }
+
+    /// Calls `f` for every entry.
+    #[cfg(not(target_os = "macos"))]
+    pub fn read(&self, mut f: impl FnMut(Entry)) -> io::Result<()> {
+        // fdopendir takes the descriptor over, so give it a copy.
+        let fd = unsafe { libc::dup(self.fd) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let dir = unsafe { libc::fdopendir(fd) };
+        if dir.is_null() {
+            let err = io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(err);
+        }
+        loop {
+            let entry = unsafe { libc::readdir(dir) };
+            if entry.is_null() {
+                break;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+            let bytes = name.to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            let found = unsafe {
+                libc::fstatat(self.fd, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW)
+            };
+            if found != 0 {
+                continue;
+            }
+            let kind = match stat.st_mode & libc::S_IFMT {
+                libc::S_IFREG => Kind::File,
+                libc::S_IFDIR => Kind::Dir,
+                libc::S_IFLNK => Kind::Symlink,
+                _ => Kind::Other,
+            };
+            f(Entry {
+                name: OsStr::from_bytes(bytes),
+                kind,
+                dev: stat.st_dev as u64,
+                links: stat.st_nlink as u32,
+                // Like macOS, folders themselves count as 0 bytes.
+                size: if kind == Kind::Dir {
+                    0
+                } else {
+                    stat.st_blocks as u64 * 512
+                },
+            });
+        }
+        unsafe { libc::closedir(dir) };
+        Ok(())
     }
 }
