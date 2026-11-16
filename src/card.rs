@@ -18,6 +18,7 @@ use crate::disk::{self, Category, Progress, Report, Volume};
 use crate::sound::{Sound, Ticker};
 use crate::treemap::{self, Rect};
 
+mod apps;
 mod confirm;
 mod onboarding;
 
@@ -160,6 +161,8 @@ pub struct Card {
     was_cleaning: u64,
     /// First launch on macOS: which guarded folders to scan, before the scan.
     onboarding: Option<onboarding::Onboarding>,
+    /// The panel for removing apps, while it is open.
+    apps: Option<apps::Apps>,
 }
 
 /// Legend geometry, shared by the layout and the gliding highlight.
@@ -222,6 +225,7 @@ impl Card {
             ticker: Ticker::default(),
             was_cleaning: 0,
             onboarding: None,
+            apps: None,
         };
         // Autoplay waits a moment so a screen recording catches the scan.
         if !autoplay && !card.onboard(cx) {
@@ -1240,16 +1244,32 @@ impl Render for Card {
                     .child(div().h(px(18.0)).child(self.status_line())),
             )
             .child(
-                Button::new("rescan")
-                    .ghost()
-                    .small()
-                    .icon(IconName::RefreshCw)
-                    .label("Rescan")
-                    .disabled(!idle)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.scan();
-                        cx.notify();
-                    })),
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("apps")
+                            .ghost()
+                            .small()
+                            .icon(IconName::LayoutGrid)
+                            .label("Apps")
+                            .disabled(!idle)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_apps(cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("rescan")
+                            .ghost()
+                            .small()
+                            .icon(IconName::RefreshCw)
+                            .label("Rescan")
+                            .disabled(!idle)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.scan();
+                                cx.notify();
+                            })),
+                    ),
             );
 
         let model = self.bar();
@@ -1343,6 +1363,7 @@ impl Render for Card {
             .children(rows);
 
         let confirm = self.render_confirm(cx);
+        let apps = self.render_apps(cx);
         v_flex()
             .relative()
             .size_full()
@@ -1359,6 +1380,7 @@ impl Render for Card {
             .child(div().flex_none().h(px(1.0)).bg(rgb(LINE)))
             .child(self.cleanup(cx))
             .children(confirm)
+            .children(apps)
             .into_any_element()
     }
 }

@@ -9,6 +9,7 @@ mod fsevents;
 #[cfg(target_os = "macos")]
 mod grant;
 mod history;
+mod uninstall;
 /// Linux has no change journal that outlives the app, so every scan is full.
 #[cfg(not(target_os = "macos"))]
 mod fsevents {
@@ -37,7 +38,7 @@ use gpui_kit::*;
 
 actions!(beautifuldisk, [Quit]);
 
-assets::icon_assets!(ExtraIcons, [RefreshCw]);
+assets::icon_assets!(ExtraIcons, [RefreshCw, LayoutGrid]);
 
 /// The app's own two-layer icons from `assets/icons`, served as
 /// `icons/<name>.base.svg` and `icons/<name>.accent.svg`.

@@ -18,7 +18,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 objc2-core-foundation = { version = "0.3.2", features = ["CFArray", "CFString"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGImage", "CGWindow"] }
 objc2-core-services = { version = "0.3.2", default-features = false, features = ["std", "libc", "FSEvents", "dispatch2"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSData", "NSDictionary", "NSGeometry", "NSURL", "NSArray", "NSValue", "NSEnumerator"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSData", "NSBundle", "NSFileManager", "NSError", "NSDictionary", "NSGeometry", "NSURL", "NSArray", "NSValue", "NSEnumerator"] }
 raw-window-handle = "0.6.2"
 
 # GPUI is slow unoptimized; optimize dependencies so debug builds animate smoothly.
