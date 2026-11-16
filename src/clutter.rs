@@ -13,6 +13,9 @@ use dither_gpui::dither_core::Tone;
 use gpui_kit::Image;
 use rayon::prelude::*;
 
+mod apps;
+mod leftovers;
+
 use crate::access;
 use crate::disk::{self, Category, Progress};
 use crate::history;
@@ -60,15 +63,17 @@ enum How {
     Old(Vec<(PathBuf, Duration)>, Vec<PathBuf>),
     /// Delete these folders or files outright.
     Paths(Vec<(PathBuf, u64)>),
+    /// Per app data folder, caches to delete unless the app is running.
+    Unlocked(Vec<(PathBuf, Vec<(PathBuf, u64)>)>),
     /// Git worktrees, removed with `git worktree remove`.
     Worktrees(Vec<(PathBuf, u64)>),
     /// Simulator device folders, deleted with `simctl`.
     Simulators(Vec<(PathBuf, u64)>),
     /// Android virtual devices: the .avd folder and its .ini.
     Emulators(Vec<(PathBuf, u64)>),
-    /// A command for the `docker` binary at this path that frees about this
-    /// many bytes.
-    Docker(PathBuf, &'static [&'static str], u64),
+    /// A command for the program at this path (Docker, Homebrew) that frees
+    /// about this many bytes.
+    Run(PathBuf, &'static [&'static str], u64),
     /// A package manager's download cache outside home, emptied by the
     /// package manager itself through `pkexec`, which asks for the password.
     /// What is freed is measured again afterwards.
@@ -127,12 +132,20 @@ impl Item {
                 })
                 .collect(),
             How::Paths(list) => each(list, "Deleted"),
+            How::Unlocked(apps) => apps
+                .iter()
+                .flat_map(|(_, leaves)| each(leaves, "Deleted unless the app is open"))
+                .collect(),
             How::Worktrees(list) => each(list, "Removed with git worktree remove"),
             How::Simulators(list) => each(list, "Deleted with simctl unless running"),
             How::Emulators(list) => each(list, "Deleted with its .ini unless running"),
-            How::Docker(docker, args, _) => vec![Target {
-                what: format!("docker {}", args.join(" ")),
-                how: format!("Runs {}", docker.display()),
+            How::Run(program, args, _) => vec![Target {
+                what: format!(
+                    "{} {}",
+                    program.file_name().unwrap_or_default().to_string_lossy(),
+                    args.join(" ")
+                ),
+                how: format!("Runs {}", program.display()),
             }],
             How::System(command, dirs) => vec![Target {
                 what: format!("pkexec {}", command.join(" ")),
@@ -196,7 +209,11 @@ const CACHES: &[Spec] = &[
     spec(
         "Xcode build data",
         REBUILT,
-        &["Library/Developer/Xcode/DerivedData"],
+        &[
+            "Library/Developer/Xcode/DerivedData",
+            "Library/Developer/Xcode/Products",
+            "Library/Developer/Xcode/UserData/IB Support",
+        ],
         215.0,
         XCODE,
         Pick::Dev,
@@ -270,7 +287,12 @@ const CACHES: &[Spec] = &[
     spec(
         "npm cache",
         AGAIN,
-        &[".npm/_cacache", ".npm/_npx"],
+        &[
+            ".npm/_cacache",
+            ".npm/_npx",
+            ".npm/_logs",
+            ".npm/_prebuilds",
+        ],
         25.0,
         Source::Logo(Logo::Npm),
         Pick::Dev,
@@ -456,7 +478,7 @@ const CACHES: &[Spec] = &[
     spec(
         "node-gyp headers",
         AGAIN,
-        &[".cache/node-gyp", "Library/Caches/node-gyp"],
+        &[".cache/node-gyp", "Library/Caches/node-gyp", ".node-gyp"],
         95.0,
         Source::Logo(Logo::Node),
         Pick::Dev,
@@ -579,7 +601,7 @@ const CACHES: &[Spec] = &[
     spec(
         "Ruby gem cache",
         AGAIN,
-        &[".bundle/cache", ".gem/cache"],
+        &[".bundle/cache", ".gem/cache", ".gem/specs"],
         355.0,
         Source::File,
         Pick::Dev,
@@ -644,6 +666,73 @@ const CACHES: &[Spec] = &[
         Pick::Dev,
     ),
     spec(
+        "Lint and bundler caches",
+        "ESLint, Prettier, mypy, Ruff, Vite, webpack, Prisma and Terraform. Rebuilt when needed.",
+        &[
+            ".cache/eslint",
+            ".cache/prettier",
+            ".cache/mypy",
+            ".cache/ruff",
+            ".cache/vite",
+            ".cache/webpack",
+            ".cache/prisma",
+            ".cache/terraform",
+        ],
+        280.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "Corepack downloads",
+        AGAIN,
+        &[".cache/node/corepack", "Library/Caches/node/corepack"],
+        100.0,
+        Source::Logo(Logo::Node),
+        Pick::Dev,
+    ),
+    spec(
+        "Version manager downloads",
+        "pyenv, rbenv, opam and Hex downloads. Downloaded again when needed.",
+        &[
+            ".pyenv/cache",
+            ".rbenv/cache",
+            ".opam/download-cache",
+            ".hex/cache",
+        ],
+        60.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "CLI caches",
+        "AWS, Kubernetes, Docker Buildx and Oh My Zsh. Rebuilt when needed.",
+        &[
+            ".aws/cli/cache",
+            ".kube/cache",
+            ".docker/buildx/cache",
+            ".oh-my-zsh/cache",
+        ],
+        205.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
+        "Expo caches",
+        AGAIN,
+        &[
+            ".expo/expo-go",
+            ".expo/android-apk-cache",
+            ".expo/ios-simulator-app-cache",
+            ".expo/native-modules-cache",
+            ".expo/schema-cache",
+            ".expo/template-cache",
+            ".expo/versions-cache",
+        ],
+        240.0,
+        Source::File,
+        Pick::Dev,
+    ),
+    spec(
         "PyTorch models",
         "Models you downloaded.",
         &[".cache/torch"],
@@ -700,8 +789,18 @@ struct OpenApp {
 
 const OPEN_APPS: &[OpenApp] = &[
     OpenApp {
+        name: "Steam",
+        items: &["Steam caches"],
+        processes: &["Steam.app/", "ubuntu12_32/steam", "steamwebhelper"],
+    },
+    OpenApp {
+        name: "Messages",
+        items: &["Messages previews"],
+        processes: &["Messages.app/"],
+    },
+    OpenApp {
         name: "Chrome",
-        items: &["Chrome cache"],
+        items: &["Chrome cache", "Chrome AI models"],
         processes: &["Google Chrome.app/", "/opt/google/chrome/", "/chromium"],
     },
     OpenApp {
@@ -847,6 +946,16 @@ pub const EXTRA_ROOTS: &[&str] = &[
     ".gem",
     ".terraform.d",
     ".konan",
+    ".node-gyp",
+    ".pyenv",
+    ".rbenv",
+    ".opam",
+    ".hex",
+    ".aws",
+    ".kube",
+    ".docker",
+    ".oh-my-zsh",
+    ".expo",
 ];
 
 /// The category the scan counted `path` under: its deepest root's.
@@ -1076,12 +1185,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         bytes: targets.iter().map(|(_, b)| b).sum(),
         how: How::Paths(targets),
     });
-    let web = outside_worktrees(index.search(&projects, |name, _, _| {
-        matches!(
-            name,
-            b".next" | b".turbo" | b".nuxt" | b".svelte-kit" | b".parcel-cache"
-        )
-    }));
+    let web = outside_worktrees(index.search(&projects, |name, _, _| WEB_CACHES.contains(&name)));
     found.push(Found {
         name: "Web build caches".into(),
         detail: format!(
@@ -1096,6 +1200,79 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         bytes: web.iter().map(|(_, b)| b).sum(),
         how: How::Paths(web),
     });
+    let find = |want: &dyn Fn(&[u8], bool) -> bool| {
+        outside_worktrees(search_projects(index, &projects, want))
+    };
+    let python = find(&|name, _| PYTHON_CACHES.contains(&name));
+    found.push(Found {
+        name: "Python caches".into(),
+        detail: format!(
+            "{}: __pycache__, .pytest_cache, .tox and similar. {REBUILT}",
+            count(python.len(), "folder", "folders")
+        ),
+        hue: 58.0,
+        icon: Source::Logo(Logo::Python),
+        icon_file: None,
+        category: Category::Developer,
+        pick: Pick::On,
+        bytes: python.iter().map(|(_, b)| b).sum(),
+        how: How::Paths(python),
+    });
+    // Tools mark caches with a CACHEDIR.TAG; Rust's are their own item.
+    // Python and web caches often carry the tag too, they stay their own items.
+    let other = find(&|name, build| {
+        PYTHON_CACHES.contains(&name)
+            || WEB_CACHES.contains(&name)
+            || build
+            || matches!(
+                name,
+                b".dart_tool" | b".zig-cache" | b"zig-out" | b".terragrunt-cache" | b".gradle"
+            )
+    })
+    .into_iter()
+    .filter(|(p, _)| {
+        let name = p.file_name().map(|n| n.as_encoded_bytes());
+        !name.is_some_and(|n| PYTHON_CACHES.contains(&n) || WEB_CACHES.contains(&n))
+    });
+    let swift = find(&|name, _| name == b".build")
+        .into_iter()
+        .filter(|(p, _)| p.with_file_name("Package.swift").exists());
+    let other: Vec<_> = other.into_iter().chain(swift).collect();
+    found.push(Found {
+        name: "Other build caches".into(),
+        detail: format!(
+            "{}: Dart, Zig, Swift, Gradle and tool caches. {REBUILT}",
+            count(other.len(), "folder", "folders")
+        ),
+        hue: 240.0,
+        icon: Source::File,
+        icon_file: None,
+        category: Category::Developer,
+        pick: Pick::On,
+        bytes: other.iter().map(|(_, b)| b).sum(),
+        how: How::Paths(other),
+    });
+    // Folders with these names may hold your own files, so only ones next to
+    // a project file that git doesn't track.
+    let builds: Vec<_> = find(&|name, _| matches!(name, b"dist" | b"build" | b"Pods"))
+        .into_par_iter()
+        .filter(|(p, _)| built_output(p))
+        .collect();
+    found.push(Found {
+        name: "Project build folders".into(),
+        detail: format!(
+            "{}: dist, build and Pods that git doesn't track. {REBUILT}",
+            count(builds.len(), "folder", "folders")
+        ),
+        hue: 245.0,
+        icon: Source::Logo(Logo::Git),
+        icon_file: None,
+        category: Category::Developer,
+        pick: Pick::Off,
+        bytes: builds.iter().map(|(_, b)| b).sum(),
+        how: How::Paths(builds),
+    });
+
     let venvs = outside_worktrees(index.search(&projects, |name, _, _| name == b".venv"));
     found.push(Found {
         name: "Python environments".into(),
@@ -1198,6 +1375,8 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
     });
 
     found.extend(docker());
+    found.extend(apps::find(home, &roots));
+    found.extend(leftovers::find(home, &roots));
     found.extend(system_caches());
 
     // Developer caches are cleared together, so small ones are worth it too.
@@ -1223,6 +1402,81 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
             how: f.how,
         })
         .collect()
+}
+
+const WEB_CACHES: &[&[u8]] = &[
+    b".next",
+    b".turbo",
+    b".nuxt",
+    b".svelte-kit",
+    b".parcel-cache",
+    b".angular",
+    b".astro",
+    b".output",
+];
+const PYTHON_CACHES: &[&[u8]] = &[
+    b"__pycache__",
+    b".pytest_cache",
+    b".mypy_cache",
+    b".ruff_cache",
+    b".tox",
+    b".nox",
+];
+
+/// Topmost project folders `want` accepts (by name, and whether a tool
+/// tagged it as a cache), never looking inside folders other items cover.
+fn search_projects(
+    index: &Index,
+    projects: &[PathBuf],
+    want: impl Fn(&[u8], bool) -> bool,
+) -> Vec<(PathBuf, u64)> {
+    const COVERED: &[&[u8]] = &[b"node_modules", b".venv", b"venv", b".git", b"target"];
+    index
+        .search(projects, |name, _, build| {
+            COVERED.contains(&name) || want(name, build)
+        })
+        .into_iter()
+        .filter(|(p, _)| {
+            !p.file_name()
+                .is_some_and(|n| COVERED.contains(&n.as_encoded_bytes()))
+        })
+        .collect()
+}
+
+/// Whether `dir` (a dist, build or Pods folder) is a project's build output:
+/// beside the file that builds it, and not tracked by git.
+fn built_output(dir: &Path) -> bool {
+    const PROJECT_FILES: &[&str] = &[
+        "package.json",
+        "pyproject.toml",
+        "setup.py",
+        "Cargo.toml",
+        "build.gradle",
+        "build.gradle.kts",
+        "CMakeLists.txt",
+        "meson.build",
+    ];
+    let Some(parent) = dir.parent() else {
+        return false;
+    };
+    let beside = if dir.file_name() == Some("Pods".as_ref()) {
+        parent.join("Podfile").exists()
+    } else {
+        PROJECT_FILES.iter().any(|f| parent.join(f).exists())
+    };
+    if !beside {
+        return false;
+    }
+    // Any tracked file inside means someone committed it.
+    let tracked = Command::new("git")
+        .arg("-C")
+        .arg(parent)
+        .args(["ls-files", "--"])
+        .arg(dir)
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+    !tracked
 }
 
 fn is_backup(name: &[u8]) -> bool {
@@ -1443,6 +1697,13 @@ fn run(how: &How, clear: &Clear) {
         How::Paths(paths) => {
             paths.par_iter().for_each(|(p, _)| clear.remove(p));
         }
+        How::Unlocked(apps) => {
+            for (dir, leaves) in apps {
+                if !apps::locked(dir) {
+                    leaves.par_iter().for_each(|(p, _)| clear.remove(p));
+                }
+            }
+        }
         How::Worktrees(list) => {
             list.par_iter().for_each(|(path, bytes)| {
                 if clear.guard.check(path).is_none() {
@@ -1499,7 +1760,7 @@ fn run(how: &How, clear: &Clear) {
                 clear.remove(&avd.with_extension("ini"));
             }
         }
-        How::Docker(docker, args, bytes) => {
+        How::Run(docker, args, bytes) => {
             progress.show(docker);
             let ok = Command::new(docker)
                 .args(*args)
@@ -1582,7 +1843,7 @@ fn system_caches() -> Vec<Found> {
 }
 
 /// Disk use of what's readable under `path`, counted like the scan.
-fn dir_size(path: &Path) -> u64 {
+pub(crate) fn dir_size(path: &Path) -> u64 {
     let Ok(md) = fs::symlink_metadata(path) else {
         return 0;
     };
@@ -1634,7 +1895,7 @@ fn docker() -> Vec<Found> {
             category: Category::System,
             pick: Pick::Dev,
             bytes: cache,
-            how: How::Docker(docker.clone(), &["builder", "prune", "-af"], cache),
+            how: How::Run(docker.clone(), &["builder", "prune", "-af"], cache),
         },
         Found {
             name: "Docker images".into(),
@@ -1645,7 +1906,7 @@ fn docker() -> Vec<Found> {
             category: Category::System,
             pick: Pick::Off,
             bytes: images,
-            how: How::Docker(docker, &["image", "prune", "-af"], images),
+            how: How::Run(docker, &["image", "prune", "-af"], images),
         },
     ]
 }
@@ -1667,7 +1928,7 @@ fn docker_bytes(size: &str) -> Option<u64> {
 
 /// Stdout of a command that succeeded within `limit`. A stopped Docker
 /// daemon can hang the CLI, and detection must not wait on it.
-fn run_for(command: &mut Command, limit: Duration) -> Option<String> {
+pub(crate) fn run_for(command: &mut Command, limit: Duration) -> Option<String> {
     let mut child = command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -1972,6 +2233,74 @@ mod tests {
         assert!(outside.join("keep").exists());
         assert!(Guard::new(Path::new("/")).is_none());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn finds_project_caches_but_not_your_files() {
+        let home = std::env::temp_dir().join(format!("bd-proj-{}", std::process::id()));
+        let dev = home.join("Developer");
+        let files = [
+            "web/package.json",
+            "web/dist/app.js",
+            "web/node_modules/pkg/dist/x.js",
+            "web/node_modules/pkg/__pycache__/x.pyc",
+            "py/pyproject.toml",
+            "py/src/__pycache__/m.pyc",
+            "py/.mypy_cache/CACHEDIR.TAG",
+            "py/.tox/x",
+            "notes/dist/mine.txt",
+            "tagged/tool-cache/CACHEDIR.TAG",
+            "shipped/package.json",
+            "shipped/build/out.js",
+        ];
+        for f in files {
+            let path = dev.join(f);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "x").unwrap();
+        }
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(dev.join("shipped"))
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok);
+        };
+        git(&["init", "-q"]);
+        git(&["add", "build/out.js"]);
+
+        let tree = crate::tree::Tree::scan(&home, &Progress::default());
+        let index = tree.index();
+        let projects = [dev.clone()];
+        let names = |mut found: Vec<(PathBuf, u64)>| {
+            found.sort();
+            found
+                .into_iter()
+                .map(|(p, _)| p.strip_prefix(&dev).unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let paths = |list: &[&str]| list.iter().map(PathBuf::from).collect::<Vec<_>>();
+
+        let python = search_projects(&index, &projects, |name, _| PYTHON_CACHES.contains(&name));
+        assert_eq!(
+            names(python),
+            paths(&["py/.mypy_cache", "py/.tox", "py/src/__pycache__"])
+        );
+        let tagged = search_projects(&index, &projects, |name, build| {
+            build && !PYTHON_CACHES.contains(&name)
+        });
+        assert_eq!(names(tagged), paths(&["tagged/tool-cache"]));
+        let builds: Vec<_> = search_projects(&index, &projects, |name, _| {
+            matches!(name, b"dist" | b"build")
+        })
+        .into_iter()
+        .filter(|(p, _)| built_output(p))
+        .collect();
+        assert_eq!(names(builds), paths(&["web/dist"]));
+        fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

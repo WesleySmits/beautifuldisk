@@ -26,12 +26,10 @@ const BUILD_OUTPUT: u8 = 2;
 /// Smaller files are not worth naming as a category's largest.
 const LARGEST_MIN: u64 = 1_000_000;
 
-fn tags_for(path: &Path, name: &OsStr) -> u8 {
+fn tags_for(name: &OsStr) -> u8 {
     match name.as_bytes() {
         b"CoreSimulator" => SIMULATORS,
         b"DerivedData" => BUILD_OUTPUT,
-        // Cargo marks its target dirs; plain "target" folders may be anything.
-        b"target" if path.join("CACHEDIR.TAG").exists() => BUILD_OUTPUT,
         _ => 0,
     }
 }
@@ -71,6 +69,9 @@ pub(crate) fn pool() -> &'static rayon::ThreadPool {
 /// What one folder holds, from a single listing.
 struct Listing {
     own: u64,
+    /// Holds a CACHEDIR.TAG: tools like Cargo and pytest mark their build
+    /// output and caches with one.
+    cache_tag: bool,
     largest: Option<(Box<str>, u64)>,
     subdirs: Vec<(OsString, Option<Dir>)>,
 }
@@ -78,6 +79,7 @@ struct Listing {
 fn list(handle: &Dir, dev: u64) -> Listing {
     let mut listing = Listing {
         own: 0,
+        cache_tag: false,
         largest: None,
         subdirs: Vec::new(),
     };
@@ -90,6 +92,9 @@ fn list(handle: &Dir, dev: u64) -> Listing {
                 .subdirs
                 .push((entry.name.to_owned(), handle.open_child(entry.name)));
             return;
+        }
+        if entry.name == "CACHEDIR.TAG" {
+            listing.cache_tag = true;
         }
         // A hard-linked file counts a share per link, so the links add up to
         // its size once without tracking every inode across the scan.
@@ -141,6 +146,10 @@ impl<'a> Walk<'a> {
         let listing = list(&handle, at.dev);
         drop(handle);
         self.progress.add(at.category, listing.own);
+        let at = Place {
+            tags: at.tags | if listing.cache_tag { BUILD_OUTPUT } else { 0 },
+            ..at
+        };
         let index = self.push(Node {
             parent: at.parent,
             group: at.group,
@@ -186,7 +195,7 @@ impl<'a> Walk<'a> {
                 parent: index,
                 group,
                 category: at.category,
-                tags: at.tags | tags_for(&child, &name),
+                tags: at.tags | tags_for(&name),
                 dev: at.dev,
             };
             let name = name.into_vec().into_boxed_slice();
@@ -309,6 +318,9 @@ impl Tree {
                 let node = &mut nodes[index as usize];
                 node.own = listing.own;
                 node.largest = listing.largest;
+                if listing.cache_tag {
+                    node.tags |= BUILD_OUTPUT;
+                }
                 let existing: HashMap<&[u8], u32> = children
                     .of(index)
                     .iter()
@@ -564,7 +576,8 @@ impl Children {
 
 // Cache file: a flat list of live folders, parents before children.
 
-const MAGIC: &[u8; 8] = b"BDSKTRE1";
+// 2: folders holding a CACHEDIR.TAG are marked as build output.
+const MAGIC: &[u8; 8] = b"BDSKTRE2";
 
 fn cache_path(home: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
