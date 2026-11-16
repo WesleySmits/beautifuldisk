@@ -105,7 +105,14 @@ fn main() {
                 Some((x, y)) => WindowBounds::Windowed(Bounds::new(point(px(x), px(y)), window)),
                 None => WindowBounds::centered(window, cx),
             }),
-            titlebar: None,
+            // macOS: no title bar. Linux: the title shows in the taskbar and
+            // app switcher.
+            titlebar: (!cfg!(target_os = "macos")).then(|| TitlebarOptions {
+                title: Some("Beautiful Disk".into()),
+                ..Default::default()
+            }),
+            // Matches beautifuldisk.desktop, so Linux docks show its icon.
+            app_id: Some("beautifuldisk".into()),
             is_resizable: false,
             ..Default::default()
         };
