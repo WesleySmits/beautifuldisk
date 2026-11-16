@@ -53,7 +53,8 @@ fn icon(category: Category) -> IconName {
 }
 
 fn gb(bytes: f64) -> String {
-    format!("{:.1} GB", bytes / 1e9)
+    // Easing can dip a hair below zero; never show "-0.0 GB".
+    format!("{:.1} GB", (bytes / 1e9).max(0.0) + 0.0)
 }
 
 /// Disk capacity reads like a product spec: "512 GB", "1 TB".
@@ -84,6 +85,7 @@ enum Phase {
 
 pub struct Card {
     demo: bool,
+    autoplay: bool,
     volume: Volume,
     progress: Arc<Progress>,
     phase: Phase,
@@ -148,9 +150,10 @@ fn spring(x: f32, v: f32, dt: f32) -> (f32, f32) {
 }
 
 impl Card {
-    pub fn new(demo: bool) -> Self {
+    pub fn new(demo: bool, autoplay: bool) -> Self {
         let mut card = Self {
             demo,
+            autoplay,
             volume: Volume { total: 0, used: 0 },
             progress: Arc::default(),
             phase: Phase::Idle,
@@ -184,7 +187,10 @@ impl Card {
             ticker: Ticker::default(),
             was_cleaning: 0,
         };
-        card.scan();
+        // Autoplay waits a moment so a screen recording catches the scan.
+        if !autoplay {
+            card.scan();
+        }
         card
     }
 
@@ -382,6 +388,9 @@ impl Card {
             self.items_at = self.time;
             self.items = Some(items);
         }
+        if self.autoplay && self.play_script() {
+            moving = true;
+        }
         let cleaning = self.progress.cleaning();
         if let Some(items) = &self.items {
             for (i, item) in items.iter().enumerate() {
@@ -459,6 +468,36 @@ impl Card {
         bar::step_particles(&mut self.particles, &mut self.rng, dt, &emit, rate);
 
         working || moving || !self.particles.is_empty()
+    }
+
+    /// `--autoplay`: scans after a pause, hovers a few items once they are
+    /// in, then clears. Returns whether the script is still waiting to act.
+    fn play_script(&mut self) -> bool {
+        const HOVERS: [usize; 3] = [0, 3, 1];
+        const HOLD: f32 = 0.6;
+        if self.volume.total == 0 {
+            if self.time > 2.0 {
+                self.scan();
+            }
+            return true;
+        }
+        if self.phase != Phase::Idle || self.items.is_none() || self.freed > 0 {
+            return false;
+        }
+        let t = self.time - self.items_at - 1.4;
+        if t < 0.0 {
+            return true;
+        }
+        match HOVERS.get((t / HOLD) as usize) {
+            Some(&i) => {
+                self.hover_item = Some(i);
+                true
+            }
+            None => {
+                self.clear();
+                false
+            }
+        }
     }
 
     /// What each tile's area follows: the item's size until its intro is
@@ -799,7 +838,7 @@ impl Card {
                     .h(px(r.h))
                     .when(idle, |tile| tile.cursor_pointer())
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if this.phase != Phase::Idle {
+                        if this.phase != Phase::Idle || this.autoplay {
                             return;
                         }
                         if *hovered {
@@ -994,7 +1033,10 @@ impl Render for Card {
             .h(px(54.0))
             .w_full()
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
-                if this.phase != Phase::Idle || !this.bar_bounds.get().contains(&e.position) {
+                if this.phase != Phase::Idle
+                    || this.autoplay
+                    || !this.bar_bounds.get().contains(&e.position)
+                {
                     return;
                 }
                 let hover = this.category_at(e.position.x);
@@ -1004,7 +1046,7 @@ impl Render for Card {
                 }
             }))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                if !hovered {
+                if !hovered && !this.autoplay {
                     this.hover = None;
                     cx.notify();
                 }
@@ -1039,7 +1081,7 @@ impl Render for Card {
                     .gap_2()
                     .rounded(px(6.0))
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if this.phase != Phase::Idle {
+                        if this.phase != Phase::Idle || this.autoplay {
                             return;
                         }
                         if *hovered {

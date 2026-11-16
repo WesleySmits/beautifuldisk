@@ -2,9 +2,12 @@
 //! tick played backwards as they shrink, and a soft whoosh when an item is
 //! cleared away. Without an audio device the app stays silent.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::f32::consts::TAU;
+use std::fs::File;
+use std::io::Write;
 use std::num::NonZero;
+use std::time::Instant;
 
 use rodio::buffer::SamplesBuffer;
 use rodio::cpal::BufferSize;
@@ -17,6 +20,10 @@ const MAX_RATE: f32 = 24.0;
 pub struct Sound {
     sink: Option<MixerDeviceSink>,
     seed: Cell<u32>,
+    /// With `BEAUTIFULDISK_SOUND_LOG` set, every sound is also appended there
+    /// (seconds since start as f64, sample count as u32, then f32 samples,
+    /// little endian), so a screen recording can get the exact soundtrack.
+    log: Option<RefCell<(Instant, File)>>,
 }
 
 impl Sound {
@@ -30,9 +37,13 @@ impl Sound {
             sink.log_on_drop(false);
             sink
         });
+        let log = std::env::var_os("BEAUTIFULDISK_SOUND_LOG")
+            .and_then(|path| File::create(path).ok())
+            .map(|file| RefCell::new((Instant::now(), file)));
         Self {
             sink,
             seed: Cell::new(0x9E37_79B9),
+            log,
         }
     }
 
@@ -46,6 +57,13 @@ impl Sound {
     }
 
     fn play(&self, samples: Vec<f32>) {
+        if let Some(log) = &self.log {
+            let (start, file) = &mut *log.borrow_mut();
+            let mut record = start.elapsed().as_secs_f64().to_le_bytes().to_vec();
+            record.extend((samples.len() as u32).to_le_bytes());
+            record.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+            let _ = file.write_all(&record);
+        }
         if let Some(sink) = &self.sink {
             let channels = NonZero::new(1).unwrap();
             let rate = NonZero::new(RATE).unwrap();

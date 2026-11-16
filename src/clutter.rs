@@ -985,7 +985,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         // One demo item takes about 0.72s; one after another would take many times that.
-        assert!(start.elapsed() < Duration::from_millis(1500), "{:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            start.elapsed()
+        );
         assert!(most > 1);
         assert_eq!(progress.cleaning(), 0);
         assert!(items.iter().all(|i| i.left() == 0));

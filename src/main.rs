@@ -54,7 +54,18 @@ impl AssetSource for AppAssets {
 
 fn main() {
     // `--demo` plays a scripted scan and clean with sample data and deletes nothing.
-    let demo = std::env::args().any(|arg| arg == "--demo");
+    // `--autoplay` is the demo playing itself: it hovers a few items, then clears.
+    let autoplay = std::env::args().any(|arg| arg == "--autoplay");
+    let demo = autoplay || std::env::args().any(|arg| arg == "--demo");
+    // Where to put an autoplay window ("x,y"), so a recording can keep it
+    // clear of the pointer.
+    let at = std::env::var("BEAUTIFULDISK_AT")
+        .ok()
+        .filter(|_| autoplay)
+        .and_then(|v| {
+            let (x, y) = v.split_once(',')?;
+            Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+        });
     application().with_assets(AppAssets).run(move |cx| {
         init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
@@ -73,13 +84,18 @@ fn main() {
             px(680.0).min(screen.height * 0.7),
         );
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(window, cx)),
+            window_bounds: Some(match at {
+                Some((x, y)) => WindowBounds::Windowed(Bounds::new(point(px(x), px(y)), window)),
+                None => WindowBounds::centered(window, cx),
+            }),
             titlebar: None,
             is_resizable: false,
             ..Default::default()
         };
-        open_window(options, cx, |_, cx| cx.new(|_| card::Card::new(demo)))
-            .expect("failed to open window");
+        open_window(options, cx, |_, cx| {
+            cx.new(|_| card::Card::new(demo, autoplay))
+        })
+        .expect("failed to open window");
         cx.activate(true);
     });
 }
