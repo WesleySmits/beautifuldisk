@@ -927,8 +927,13 @@ pub fn clean(items: Arc<Vec<Item>>, chosen: Vec<usize>, progress: Arc<Progress>,
                     };
                     if demo {
                         demo_clean(item, &freed);
-                    } else {
-                        tree::pool().install(|| run(&item.how, progress, &freed));
+                    } else if let Some(guard) = Guard::new(&disk::home()) {
+                        let clear = Clear {
+                            guard: &guard,
+                            progress,
+                            freed: &freed,
+                        };
+                        tree::pool().install(|| run(&item.how, &clear));
                     }
                     progress.set_cleaning(i, false);
                 });
@@ -938,10 +943,76 @@ pub fn clean(items: Arc<Vec<Item>>, chosen: Vec<usize>, progress: Arc<Progress>,
     });
 }
 
-fn run(how: &How, progress: &Progress, freed: &(dyn Fn(u64) + Sync)) {
+/// What clearing may touch. Every deletion goes through `check`, so a
+/// wrong path, a symlink or a mounted disk can never reach system files.
+struct Guard {
+    home: PathBuf,
+    uid: u32,
+}
+
+impl Guard {
+    /// None when clearing would be unsafe: running as root, or no real home.
+    fn new(home: &Path) -> Option<Guard> {
+        let uid = unsafe { libc::geteuid() };
+        if uid == 0 || !home.is_absolute() || home.parent().is_none() || !home.is_dir() {
+            return None;
+        }
+        Some(Guard {
+            home: home.to_path_buf(),
+            uid,
+        })
+    }
+
+    /// The disk `path` is on, if it may be deleted: below the home folder,
+    /// reached without a symlinked folder on the way, and owned by the user.
+    fn check(&self, path: &Path) -> Option<u64> {
+        let below = path.strip_prefix(&self.home).ok()?;
+        if below.as_os_str().is_empty() || below.components().any(|c| c.as_os_str() == "..") {
+            return None;
+        }
+        let mut folder = self.home.clone();
+        let mut parts = below.components().peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() {
+                break;
+            }
+            folder.push(part);
+            if fs::symlink_metadata(&folder).ok()?.file_type().is_symlink() {
+                return None;
+            }
+        }
+        let md = fs::symlink_metadata(path).ok()?;
+        (md.uid() == self.uid).then(|| md.dev())
+    }
+}
+
+/// Everything a clearing worker needs.
+struct Clear<'a> {
+    guard: &'a Guard,
+    progress: &'a Progress,
+    freed: &'a (dyn Fn(u64) + Sync),
+}
+
+impl Clear<'_> {
+    /// Deletes `path` if the guard allows it.
+    fn remove(&self, path: &Path) {
+        if let Some(dev) = self.guard.check(path) {
+            remove_all(path, dev, self);
+        }
+    }
+}
+
+fn run(how: &How, clear: &Clear) {
+    let (progress, freed) = (clear.progress, clear.freed);
     match how {
         How::Contents(dirs, skip) => {
             for dir in dirs {
+                // Read only real folders inside home, never through a symlink.
+                if clear.guard.check(dir).is_none()
+                    || fs::symlink_metadata(dir).is_ok_and(|m| !m.is_dir())
+                {
+                    continue;
+                }
                 let Ok(entries) = fs::read_dir(dir) else {
                     continue;
                 };
@@ -950,18 +1021,17 @@ fn run(how: &How, progress: &Progress, freed: &(dyn Fn(u64) + Sync)) {
                     .map(|e| e.path())
                     .filter(|p| !skip.contains(p))
                     .collect();
-                children
-                    .par_iter()
-                    .for_each(|p| remove_all(p, progress, freed));
+                children.par_iter().for_each(|p| clear.remove(p));
             }
         }
         How::Paths(paths) => {
-            paths
-                .par_iter()
-                .for_each(|(p, _)| remove_all(p, progress, freed));
+            paths.par_iter().for_each(|(p, _)| clear.remove(p));
         }
         How::Worktrees(list) => {
             list.par_iter().for_each(|(path, bytes)| {
+                if clear.guard.check(path).is_none() {
+                    return;
+                }
                 progress.show(path);
                 // Without --force, git refuses worktrees with changes.
                 let removed = Command::new("git")
@@ -1009,8 +1079,8 @@ fn run(how: &How, progress: &Progress, freed: &(dyn Fn(u64) + Sync)) {
                 if running {
                     continue;
                 }
-                remove_all(avd, progress, freed);
-                let _ = fs::remove_file(avd.with_extension("ini"));
+                clear.remove(avd);
+                clear.remove(&avd.with_extension("ini"));
             }
         }
         How::Docker(docker, args, bytes) => {
@@ -1125,16 +1195,20 @@ fn run_for(command: &mut Command, limit: Duration) -> Option<String> {
     }
 }
 
-/// Deletes `path` and everything in it. Never follows symlinks.
-fn remove_all(path: &Path, progress: &Progress, freed: &(dyn Fn(u64) + Sync)) {
+/// Deletes `path` and everything in it. Never follows symlinks, and skips
+/// anything on another disk (`dev`) or owned by someone else.
+fn remove_all(path: &Path, dev: u64, clear: &Clear) {
     let Ok(md) = fs::symlink_metadata(path) else {
         return;
     };
+    if md.dev() != dev || md.uid() != clear.guard.uid {
+        return;
+    }
     if !md.is_dir() {
-        progress.show(path);
+        clear.progress.show(path);
         if fs::remove_file(path).is_ok() {
             // Same share-per-link counting as the scan.
-            freed(md.blocks() * 512 / md.nlink().max(1));
+            (clear.freed)(md.blocks() * 512 / md.nlink().max(1));
         }
         return;
     }
@@ -1145,9 +1219,7 @@ fn remove_all(path: &Path, progress: &Progress, freed: &(dyn Fn(u64) + Sync)) {
     }
     if let Ok(entries) = fs::read_dir(path) {
         let children: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-        children
-            .par_iter()
-            .for_each(|p| remove_all(p, progress, freed));
+        children.par_iter().for_each(|p| remove_all(p, dev, clear));
     }
     let _ = fs::remove_dir(path);
 }
@@ -1277,6 +1349,42 @@ fn demo_clean(item: &Item, freed: &dyn Fn(u64)) {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn clearing_stays_inside_home() {
+        let root = std::env::temp_dir().join(format!("bd-guard-{}", std::process::id()));
+        let (home, outside) = (root.join("home"), root.join("outside"));
+        let cache = home.join(".cache");
+        fs::create_dir_all(cache.join("tool")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(cache.join("tool/blob"), "x").unwrap();
+        fs::write(outside.join("keep"), "x").unwrap();
+        // A link inside a cache, a cache folder that is a link, and a path
+        // outside home: none may reach `outside`.
+        std::os::unix::fs::symlink(&outside, cache.join("link")).unwrap();
+        std::os::unix::fs::symlink(&outside, home.join("linked")).unwrap();
+
+        let guard = Guard::new(&home).unwrap();
+        let progress = Progress::default();
+        let clear = Clear {
+            guard: &guard,
+            progress: &progress,
+            freed: &|_| {},
+        };
+        run(
+            &How::Contents(vec![cache.clone(), home.join("linked")], Vec::new()),
+            &clear,
+        );
+        run(&How::Paths(vec![(outside.clone(), 0)]), &clear);
+        run(&How::Paths(vec![(home.join("linked/keep"), 0)]), &clear);
+        run(&How::Paths(vec![(cache.join("../../outside"), 0)]), &clear);
+
+        assert!(!cache.join("tool").exists());
+        assert!(fs::symlink_metadata(cache.join("link")).is_err());
+        assert!(outside.join("keep").exists());
+        assert!(Guard::new(Path::new("/")).is_none());
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn reads_docker_sizes() {
