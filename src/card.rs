@@ -102,11 +102,15 @@ pub struct Card {
     rng: Rng,
     time: f32,
     last_frame: Instant,
+    /// Whether the previous frame asked for another. If not, the time since
+    /// it is idle time, not animation time.
+    animating: bool,
     bar_bounds: Rc<Cell<Bounds<Pixels>>>,
     legend_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The legend's hover highlight glides between rows: x, y, width relative
     /// to the legend, and opacity.
     pill: [f32; 3],
+    pill_velocity: [f32; 3],
     pill_alpha: f32,
 }
 
@@ -114,6 +118,19 @@ pub struct Card {
 const ROW_H: f32 = 22.0;
 const ROW_GAP: f32 = 2.0;
 const COL_GAP: f32 = 12.0;
+
+/// Stiffness of the highlight's glide. Settles in about 0.2s.
+const PILL_OMEGA: f32 = 30.0;
+
+/// One step of a critically damped spring, solved exactly so any frame time
+/// is stable. `x` is the offset from the target. Keeping velocity across
+/// steps means a new target mid-glide bends the path instead of jerking it.
+fn spring(x: f32, v: f32, dt: f32) -> (f32, f32) {
+    let w = PILL_OMEGA;
+    let c = v + w * x;
+    let e = (-w * dt).exp();
+    ((x + c * dt) * e, (v - w * c * dt) * e)
+}
 
 impl Card {
     pub fn new(demo: bool) -> Self {
@@ -135,9 +152,11 @@ impl Card {
             rng: Rng::new(),
             time: 0.0,
             last_frame: Instant::now(),
+            animating: false,
             bar_bounds: Rc::default(),
             legend_bounds: Rc::default(),
             pill: [0.0; 3],
+            pill_velocity: [0.0; 3],
             pill_alpha: 0.0,
         };
         card.scan();
@@ -194,7 +213,13 @@ impl Card {
     /// says whether another frame is needed.
     fn tick(&mut self) -> bool {
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32().min(1.0 / 20.0);
+        // The first frame after idle (a hover starting a glide) would see
+        // seconds of elapsed time; use one display frame so it starts smooth.
+        let dt = if self.animating {
+            (now - self.last_frame).as_secs_f32().min(1.0 / 20.0)
+        } else {
+            1.0 / 120.0
+        };
         self.last_frame = now;
         self.time += dt;
 
@@ -265,15 +290,19 @@ impl Card {
                 w,
             ];
             for k in 0..3 {
-                self.pill[k] = if self.pill_alpha < 0.02 {
-                    to[k]
-                } else {
-                    approach(self.pill[k], to[k], dt, 0.055)
-                };
-                if (self.pill[k] - to[k]).abs() > 0.05 {
+                if self.pill_alpha < 0.02 {
+                    self.pill[k] = to[k];
+                    self.pill_velocity[k] = 0.0;
+                    continue;
+                }
+                let (x, v) = spring(self.pill[k] - to[k], self.pill_velocity[k], dt);
+                if x.abs() > 0.05 || v.abs() > 1.0 {
+                    self.pill[k] = to[k] + x;
+                    self.pill_velocity[k] = v;
                     moving = true;
                 } else {
                     self.pill[k] = to[k];
+                    self.pill_velocity[k] = 0.0;
                 }
             }
         }
@@ -529,7 +558,8 @@ impl Card {
 
 impl Render for Card {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.tick() {
+        self.animating = self.tick();
+        if self.animating {
             window.request_animation_frame();
         }
         let idle = self.phase == Phase::Idle;

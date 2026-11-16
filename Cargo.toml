@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+dispatch2 = "0.3.1"
 dither-gpui = "0.1.0"
 gpui-kit = "=0.7.3"
 libc = "0.2.191"
+objc2-core-foundation = { version = "0.3.2", features = ["CFArray", "CFString"] }
+objc2-core-services = { version = "0.3.2", default-features = false, features = ["std", "libc", "FSEvents", "dispatch2"] }
 rayon = "1.12.0"
 
 # GPUI is slow unoptimized; optimize dependencies so debug builds animate smoothly.

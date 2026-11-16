@@ -1,6 +1,9 @@
 mod bar;
+mod bulk;
 mod card;
 mod disk;
+mod fsevents;
+mod tree;
 
 use std::borrow::Cow;
 
@@ -48,7 +51,6 @@ impl AssetSource for AppAssets {
 fn main() {
     // `--demo` plays a scripted scan and clean with sample data and deletes nothing.
     let demo = std::env::args().any(|arg| arg == "--demo");
-
     application().with_assets(AppAssets).run(move |cx| {
         init(cx);
         Theme::change(ThemeMode::Dark, None, cx);

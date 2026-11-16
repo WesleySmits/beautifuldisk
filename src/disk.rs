@@ -1,7 +1,6 @@
 //! Disk scanning and cleaning. UI-free: workers write into a shared
 //! [`Progress`] that the UI samples every frame.
 
-use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -10,6 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+use crate::bulk;
+use crate::tree::Tree;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Category {
@@ -105,11 +107,7 @@ pub struct Progress {
     freed: AtomicU64,
     done: AtomicBool,
     current: Mutex<String>,
-    largest_size: [AtomicU64; 9],
-    largest: Mutex<[Option<(String, u64)>; 9]>,
-    groups: Mutex<Vec<(Category, String, Arc<AtomicU64>)>>,
-    simulators: AtomicU64,
-    build_output: AtomicU64,
+    report: Mutex<Report>,
 }
 
 /// What a finished scan learned beyond category totals, used to explain them.
@@ -141,23 +139,10 @@ impl Progress {
     }
 
     pub fn report(&self) -> Report {
-        let mut largest_item: [Option<(String, u64)>; 9] = Default::default();
-        for (category, name, bytes) in self.groups.lock().unwrap().iter() {
-            let bytes = bytes.load(Relaxed);
-            let slot = &mut largest_item[*category as usize];
-            if slot.as_ref().is_none_or(|(_, best)| bytes > *best) {
-                *slot = Some((name.clone(), bytes));
-            }
-        }
-        Report {
-            largest_file: self.largest.lock().unwrap().clone(),
-            largest_item,
-            simulators: self.simulators.load(Relaxed),
-            build_output: self.build_output.load(Relaxed),
-        }
+        self.report.lock().unwrap().clone()
     }
 
-    fn add(&self, category: Category, bytes: u64) {
+    pub(crate) fn add(&self, category: Category, bytes: u64) {
         self.bytes[category as usize].fetch_add(bytes, Relaxed);
     }
 
@@ -168,21 +153,19 @@ impl Progress {
     }
 
     /// Updates the path shown in the UI without ever blocking a worker.
-    fn show(&self, path: &Path) {
+    pub(crate) fn show(&self, path: &Path) {
         if let Ok(mut current) = self.current.try_lock() {
             current.clear();
             current.push_str(&path.to_string_lossy());
         }
     }
 
-    fn note_file(&self, category: Category, bytes: u64, name: impl FnOnce() -> String) {
-        let i = category as usize;
-        if self.largest_size[i].fetch_max(bytes, Relaxed) < bytes {
-            let mut largest = self.largest.lock().unwrap();
-            if largest[i].as_ref().is_none_or(|(_, best)| bytes > *best) {
-                largest[i] = Some((name(), bytes));
-            }
+    fn finish(&self, totals: [u64; 9], report: Report) {
+        for (bytes, total) in self.bytes.iter().zip(totals) {
+            bytes.store(total, Relaxed);
         }
+        *self.report.lock().unwrap() = report;
+        self.done.store(true, Relaxed);
     }
 }
 
@@ -193,7 +176,7 @@ pub fn home() -> PathBuf {
 }
 
 /// Where each category lives. System data is whatever the disk uses beyond these.
-fn roots(home: &Path) -> Vec<(PathBuf, Category)> {
+pub(crate) fn roots(home: &Path) -> Vec<(PathBuf, Category)> {
     let h = |p: &str| home.join(p);
     let mut roots = vec![
         ("/Applications".into(), Category::Apps),
@@ -225,142 +208,28 @@ fn roots(home: &Path) -> Vec<(PathBuf, Category)> {
     roots
 }
 
-const SIMULATORS: u8 = 1;
-const BUILD_OUTPUT: u8 = 2;
-
-fn tags_for(path: &Path, name: &str) -> u8 {
-    match name {
-        "CoreSimulator" => SIMULATORS,
-        "DerivedData" => BUILD_OUTPUT,
-        // Cargo marks its target dirs; plain "target" folders may be anything.
-        "target" if path.join("CACHEDIR.TAG").exists() => BUILD_OUTPUT,
-        _ => 0,
-    }
-}
-
-struct Walker<'a> {
-    progress: &'a Progress,
-    /// Hard-linked files are counted once.
-    seen: Mutex<HashSet<(u64, u64)>>,
-    dirs: AtomicU64,
-}
-
-impl Walker<'_> {
-    fn file_size(&self, md: &fs::Metadata) -> Option<u64> {
-        if md.nlink() > 1 && !self.seen.lock().unwrap().insert((md.dev(), md.ino())) {
-            return None;
-        }
-        // Allocated blocks, not logical length: sparse and cloud files take less.
-        Some(md.blocks() * 512)
-    }
-}
-
-fn walk<'s>(
-    scope: &rayon::Scope<'s>,
-    walker: &'s Walker<'s>,
-    dir: PathBuf,
-    dev: u64,
-    category: Category,
-    tags: u8,
-    group: Arc<AtomicU64>,
-) {
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return;
-    };
-    if walker.dirs.fetch_add(1, Relaxed) % 16 == 0 {
-        walker.progress.show(&dir);
-    }
-    let mut total = 0;
-    for entry in entries.flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        let Ok(md) = entry.metadata() else { continue };
-        if md.dev() != dev {
-            continue;
-        }
-        if kind.is_dir() {
-            let path = entry.path();
-            let tags = tags | tags_for(&path, &entry.file_name().to_string_lossy());
-            let group = group.clone();
-            scope.spawn(move |scope| walk(scope, walker, path, dev, category, tags, group));
-        } else if let Some(size) = walker.file_size(&md) {
-            total += size;
-            if kind.is_file() {
-                walker.progress.note_file(category, size, || {
-                    entry.file_name().to_string_lossy().into_owned()
-                });
-            }
-        }
-    }
-    let progress = walker.progress;
-    progress.add(category, total);
-    group.fetch_add(total, Relaxed);
-    if tags & SIMULATORS != 0 {
-        progress.simulators.fetch_add(total, Relaxed);
-    }
-    if tags & BUILD_OUTPUT != 0 {
-        progress.build_output.fetch_add(total, Relaxed);
-    }
-}
-
-/// Scans every category root in parallel. Returns immediately.
+/// Scans every category root. Returns immediately.
+///
+/// The first scan walks every folder. Later scans load the saved tree and
+/// re-read only folders FSEvents reports as changed since it was saved.
 pub fn scan(progress: Arc<Progress>) {
     thread::spawn(move || {
+        bulk::raise_fd_limit();
         let home = home();
-        // Directory reads block on IO, so oversubscribe the cores.
-        let threads = thread::available_parallelism().map_or(8, |n| n.get() * 2);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .unwrap();
-        let walker = Walker {
-            progress: &progress,
-            seen: Mutex::default(),
-            dirs: AtomicU64::new(0),
-        };
-        let walker = &walker;
-        pool.scope(|scope| {
-            for (root, category) in roots(&home) {
-                let Ok(md) = fs::metadata(&root) else {
-                    continue;
-                };
-                let dev = md.dev();
-                let Ok(entries) = fs::read_dir(&root) else {
-                    continue;
-                };
-                // Each top-level item gets its own counter so we can name the biggest one.
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    let group = Arc::new(AtomicU64::new(0));
-                    walker.progress.groups.lock().unwrap().push((
-                        category,
-                        name.clone(),
-                        group.clone(),
-                    ));
-                    let Ok(kind) = entry.file_type() else {
-                        continue;
-                    };
-                    let Ok(md) = entry.metadata() else { continue };
-                    if kind.is_dir() && md.dev() == dev {
-                        let path = entry.path();
-                        let tags = tags_for(&path, &name);
-                        scope.spawn(move |scope| {
-                            walk(scope, walker, path, dev, category, tags, group)
-                        });
-                    } else if !kind.is_dir()
-                        && let Some(size) = walker.file_size(&md)
-                    {
-                        walker.progress.add(category, size);
-                        group.fetch_add(size, Relaxed);
-                        if kind.is_file() {
-                            walker.progress.note_file(category, size, || name);
-                        }
-                    }
+        let tree = match Tree::load(&home) {
+            Some(mut tree) => {
+                if tree.refresh(&home, &progress) {
+                    tree
+                } else {
+                    Tree::scan(&home, &progress)
                 }
             }
-        });
-        progress.done.store(true, Relaxed);
+            None => Tree::scan(&home, &progress),
+        };
+        progress.finish(tree.totals(), tree.report());
+        if let Err(err) = tree.save(&home) {
+            eprintln!("could not save scan: {err}");
+        }
     });
 }
 
@@ -446,25 +315,27 @@ pub mod demo {
                 *progress.current.lock().unwrap() = PATHS[(t * 11.0) as usize].to_string();
                 thread::sleep(Duration::from_millis(18));
             }
-            *progress.largest.lock().unwrap() = {
-                let mut largest: [Option<(String, u64)>; 9] = Default::default();
-                largest[Category::Photos as usize] =
-                    Some(("Trip to Lisbon.heic".into(), 410_000_000));
-                largest[Category::Movies as usize] =
-                    Some(("Screen Recording 2026-10-02.mov".into(), 6_200_000_000));
-                largest[Category::Documents as usize] =
-                    Some(("Northwind lookbook.pdf".into(), 3_800_000_000));
-                largest[Category::Music as usize] =
-                    Some(("Live at the Roundhouse.flac".into(), 1_100_000_000));
-                largest
+            let mut report = Report::default();
+            let mut file = |c: Category, name: &str, bytes: u64| {
+                report.largest_file[c as usize] = Some((name.into(), bytes));
             };
-            progress.groups.lock().unwrap().push((
-                Category::Apps,
-                "Xcode.app".into(),
-                Arc::new(AtomicU64::new(12_100_000_000)),
-            ));
-            progress.simulators.store(17_200_000_000, Relaxed);
-            progress.build_output.store(8_100_000_000, Relaxed);
+            file(Category::Photos, "Trip to Lisbon.heic", 410_000_000);
+            file(
+                Category::Movies,
+                "Screen Recording 2026-10-02.mov",
+                6_200_000_000,
+            );
+            file(Category::Documents, "Northwind lookbook.pdf", 3_800_000_000);
+            file(
+                Category::Music,
+                "Live at the Roundhouse.flac",
+                1_100_000_000,
+            );
+            report.largest_item[Category::Apps as usize] =
+                Some(("Xcode.app".into(), 12_100_000_000));
+            report.simulators = 17_200_000_000;
+            report.build_output = 8_100_000_000;
+            *progress.report.lock().unwrap() = report;
             progress.done.store(true, Relaxed);
         });
     }
