@@ -23,6 +23,11 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$set_dir" -o "$app/Contents/Resources/AppIcon.icns"
 rm -rf "$set_dir"
+# Seal the whole bundle. The linker signs only the binary, and a downloaded
+# app whose Info.plist and icon aren't covered by its signature opens as
+# "damaged" with no way past it.
+codesign --force --deep --sign - "$app"
+codesign --verify --deep --strict "$app"
 echo "$app"
 
 if [ "$1" = "--dmg" ]; then
