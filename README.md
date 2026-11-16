@@ -2,7 +2,7 @@
   <img src="assets/readme/banner.png" alt="Beautiful Disk" width="800">
 </p>
 
-<p align="center">See what fills your Mac, then clear what your tools left behind.</p>
+<p align="center">See what fills your disk, then clear what your tools left behind. For macOS and Linux.</p>
 
 <p align="center">
   <a href="https://github.com/vkpdeveloper/beautifuldisk/releases/latest/download/beautiful-disk-launch.mp4">
@@ -19,11 +19,15 @@
   - `node_modules`, Rust build output, Xcode build data, archives and device support
   - iOS simulators and Android emulators (running ones are kept)
   - Agent worktrees from T3 Code, Codex, Cursor and Conductor (only ones without changes)
-  - Package caches: Gradle, Yarn, Go, Cargo, Homebrew, CocoaPods, Playwright
-  - Browser caches, downloaded models (Hugging Face, Ollama, LM Studio), old installers and the Trash
+  - Docker build cache and unused images (volumes and containers are never touched)
+  - Package caches: Gradle, Maven, Yarn, pnpm, bun, npm, Go, Cargo, uv, pip, Deno, Composer, Dart, Homebrew, CocoaPods
+  - Build caches: `.next`, `.turbo`, Bazel, ccache, sccache, JetBrains, VS Code, Python `.venv` folders
+  - Test browsers (Playwright, Cypress, Puppeteer), browser caches, downloaded models (Hugging Face, Ollama, LM Studio, PyTorch), old installers and the Trash
 - Clears everything you picked at the same time, with quiet ticks and a whoosh when it is gone.
 
 ## Install
+
+### macOS
 
 Download `Beautiful-Disk.dmg` from the [latest release](https://github.com/vkpdeveloper/beautifuldisk/releases/latest) and drag the app to Applications.
 
@@ -34,6 +38,14 @@ xattr -dr com.apple.quarantine "/Applications/Beautiful Disk.app"
 ```
 
 Needs a Mac with Apple silicon.
+
+### Linux
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/vkpdeveloper/beautifuldisk/main/install.sh | sh
+```
+
+Installs to `~/.local/bin` with an app menu entry. Needs x86_64, X11 or Wayland, and Vulkan drivers.
 
 ## Build
 
