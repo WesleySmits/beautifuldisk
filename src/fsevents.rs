@@ -4,8 +4,8 @@
 use std::ffi::{CStr, c_char, c_void};
 use std::path::PathBuf;
 use std::ptr::NonNull;
-use std::sync::Mutex;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dispatch2::DispatchQueue;
@@ -27,6 +27,18 @@ struct State {
     /// Set when the journal can't be trusted (dropped events, remounts).
     unreliable: Mutex<bool>,
     done: Mutex<Option<mpsc::Sender<()>>>,
+}
+
+// The stream holds its own reference to the state and drops it when it is
+// freed, so a callback still in flight after `changes_since` returns never
+// sees freed memory.
+unsafe extern "C-unwind" fn retain(info: *const c_void) -> *const c_void {
+    unsafe { Arc::increment_strong_count(info.cast::<State>()) };
+    info
+}
+
+unsafe extern "C-unwind" fn release(info: *const c_void) {
+    unsafe { Arc::decrement_strong_count(info.cast::<State>()) };
 }
 
 unsafe extern "C-unwind" fn callback(
@@ -69,11 +81,11 @@ unsafe extern "C-unwind" fn callback(
 /// journal can't answer reliably and everything must be rescanned.
 pub fn changes_since(since: u64, roots: &[PathBuf]) -> Option<Vec<Change>> {
     let (done_tx, done_rx) = mpsc::channel();
-    let state = State {
+    let state = Arc::new(State {
         changes: Mutex::default(),
         unreliable: Mutex::new(false),
         done: Mutex::new(Some(done_tx)),
-    };
+    });
     let paths: Vec<_> = roots
         .iter()
         .map(|p| CFString::from_str(&p.to_string_lossy()))
@@ -81,9 +93,9 @@ pub fn changes_since(since: u64, roots: &[PathBuf]) -> Option<Vec<Change>> {
     let paths = CFArray::from_retained_objects(&paths);
     let mut context = FSEventStreamContext {
         version: 0,
-        info: (&raw const state).cast_mut().cast(),
-        retain: None,
-        release: None,
+        info: Arc::as_ptr(&state).cast_mut().cast(),
+        retain: Some(retain),
+        release: Some(release),
         copyDescription: None,
     };
     let queue = DispatchQueue::new("beautifuldisk.fsevents", None);
@@ -103,8 +115,6 @@ pub fn changes_since(since: u64, roots: &[PathBuf]) -> Option<Vec<Change>> {
         FSEventStreamSetDispatchQueue(stream, Some(&queue));
         let finished =
             FSEventStreamStart(stream) && done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
-        // Stop and invalidate before `state` goes out of scope: after this
-        // the callback can no longer run.
         FSEventStreamStop(stream);
         FSEventStreamInvalidate(stream);
         FSEventStreamRelease(stream);
@@ -113,5 +123,5 @@ pub fn changes_since(since: u64, roots: &[PathBuf]) -> Option<Vec<Change>> {
     if !finished || *state.unreliable.lock().unwrap() {
         return None;
     }
-    Some(state.changes.into_inner().unwrap())
+    Some(std::mem::take(&mut *state.changes.lock().unwrap()))
 }
