@@ -8,9 +8,14 @@ dispatch2 = "0.3.1"
 dither-gpui = "0.1.0"
 gpui-kit = "=0.7.3"
 libc = "0.2.191"
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "objc2-core-graphics"] }
 objc2-core-foundation = { version = "0.3.2", features = ["CFArray", "CFString"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGImage"] }
 objc2-core-services = { version = "0.3.2", default-features = false, features = ["std", "libc", "FSEvents", "dispatch2"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSData", "NSDictionary", "NSGeometry", "NSURL"] }
 rayon = "1.12.0"
+rodio = { version = "0.23.0", default-features = false, features = ["playback"] }
 
 # GPUI is slow unoptimized; optimize dependencies so debug builds animate smoothly.
 [profile.dev.package."*"]

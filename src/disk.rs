@@ -2,8 +2,6 @@
 //! [`Progress`] that the UI samples every frame.
 
 use std::ffi::CString;
-use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
@@ -11,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::bulk;
+use crate::clutter::{self, Item};
 use crate::tree::Tree;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -55,31 +54,6 @@ impl Category {
     }
 }
 
-/// Something the app offers to clear, in the order it offers them.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Cleanable {
-    Caches,
-    Trash,
-}
-
-impl Cleanable {
-    pub const ALL: [Cleanable; 2] = [Cleanable::Caches, Cleanable::Trash];
-
-    pub fn category(self) -> Category {
-        match self {
-            Cleanable::Caches => Category::Caches,
-            Cleanable::Trash => Category::Trash,
-        }
-    }
-
-    fn root(self, home: &Path) -> PathBuf {
-        match self {
-            Cleanable::Caches => home.join("Library/Caches"),
-            Cleanable::Trash => home.join(".Trash"),
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct Volume {
     pub total: u64,
@@ -108,6 +82,10 @@ pub struct Progress {
     done: AtomicBool,
     current: Mutex<String>,
     report: Mutex<Report>,
+    /// Cleanup items, set once detection finishes after the scan.
+    items: Mutex<Option<Arc<Vec<Item>>>>,
+    /// Bit `i` is set while item `i` is being cleared.
+    cleaning: AtomicU64,
 }
 
 /// What a finished scan learned beyond category totals, used to explain them.
@@ -146,7 +124,39 @@ impl Progress {
         self.bytes[category as usize].fetch_add(bytes, Relaxed);
     }
 
-    fn remove(&self, category: Category, bytes: u64) {
+    pub fn items(&self) -> Option<Arc<Vec<Item>>> {
+        self.items.lock().unwrap().clone()
+    }
+
+    fn set_items(&self, items: Vec<Item>) {
+        *self.items.lock().unwrap() = Some(Arc::new(items));
+    }
+
+    /// Items being cleared right now, one bit each (items past 64 never show).
+    pub fn cleaning(&self) -> u64 {
+        self.cleaning.load(Relaxed)
+    }
+
+    pub(crate) fn set_cleaning(&self, item: usize, on: bool) {
+        let Some(bit) = 1u64.checked_shl(item as u32) else {
+            return;
+        };
+        if on {
+            self.cleaning.fetch_or(bit, Relaxed);
+        } else {
+            self.cleaning.fetch_and(!bit, Relaxed);
+        }
+    }
+
+    pub(crate) fn start_cleaning(&self) {
+        self.done.store(false, Relaxed);
+    }
+
+    pub(crate) fn finish_cleaning(&self) {
+        self.done.store(true, Relaxed);
+    }
+
+    pub(crate) fn remove(&self, category: Category, bytes: u64) {
         let _ = self.bytes[category as usize]
             .fetch_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(bytes)));
         self.freed.fetch_add(bytes, Relaxed);
@@ -191,7 +201,7 @@ pub(crate) fn roots(home: &Path) -> Vec<(PathBuf, Category)> {
         (h("Library/Caches"), Category::Caches),
         (h(".Trash"), Category::Trash),
     ];
-    for dev in [
+    for dev in clutter::EXTRA_ROOTS.iter().copied().chain([
         "Developer",
         "Projects",
         ".cargo",
@@ -202,7 +212,7 @@ pub(crate) fn roots(home: &Path) -> Vec<(PathBuf, Category)> {
         ".m2",
         ".cocoapods",
         "Library/pnpm",
-    ] {
+    ]) {
         roots.push((h(dev), Category::Developer));
     }
     roots
@@ -227,48 +237,11 @@ pub fn scan(progress: Arc<Progress>) {
             None => Tree::scan(&home, &progress),
         };
         progress.finish(tree.totals(), tree.report());
+        progress.set_items(clutter::detect(&tree.index(), &home));
         if let Err(err) = tree.save(&home) {
             eprintln!("could not save scan: {err}");
         }
     });
-}
-
-/// Deletes everything inside the cleanable's folder, keeping the folder itself.
-/// Never follows symlinks. Returns immediately.
-pub fn clean(target: Cleanable, progress: Arc<Progress>) {
-    progress.done.store(false, Relaxed);
-    thread::spawn(move || {
-        let root = target.root(&home());
-        let category = target.category();
-        if let Ok(entries) = fs::read_dir(&root) {
-            let entries: Vec<_> = entries.flatten().collect();
-            use rayon::prelude::*;
-            entries
-                .par_iter()
-                .for_each(|entry| remove(&entry.path(), &progress, category));
-        }
-        progress.done.store(true, Relaxed);
-    });
-}
-
-fn remove(path: &Path, progress: &Progress, category: Category) {
-    // symlink_metadata: a symlink is removed as a link, never followed.
-    let Ok(md) = fs::symlink_metadata(path) else {
-        return;
-    };
-    if md.is_dir() {
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                remove(&entry.path(), progress, category);
-            }
-        }
-        let _ = fs::remove_dir(path);
-    } else {
-        progress.show(path);
-        if fs::remove_file(path).is_ok() {
-            progress.remove(category, md.blocks() * 512);
-        }
-    }
 }
 
 /// A scripted scan and clean with sample data, for trying the app without
@@ -283,7 +256,7 @@ pub mod demo {
         used: 357_800_000_000,
     };
 
-    const SIZES: [f64; 9] = [52.6, 36.3, 58.6, 44.1, 41.7, 12.1, 0.0, 46.8, 31.4];
+    const SIZES: [f64; 9] = [52.6, 112.0, 38.6, 24.1, 31.7, 12.1, 0.0, 22.0, 6.4];
 
     const PATHS: [&str; 12] = [
         "/Applications/Utilities",
@@ -337,49 +310,9 @@ pub mod demo {
             report.build_output = 8_100_000_000;
             *progress.report.lock().unwrap() = report;
             progress.done.store(true, Relaxed);
-        });
-    }
-
-    pub fn clean(target: Cleanable, progress: Arc<Progress>) {
-        progress.done.store(false, Relaxed);
-        thread::spawn(move || {
-            let category = target.category();
-            let start = progress.bytes(category);
-            // Some caches are in use and stay behind.
-            let keep = if target == Cleanable::Caches {
-                1_200_000_000
-            } else {
-                0
-            };
-            let names = match target {
-                Cleanable::Caches => [
-                    "com.penrose.studio",
-                    "Northwind Mail",
-                    "com.apple.Safari",
-                    "Homebrew",
-                ],
-                Cleanable::Trash => [
-                    "Screen recording 2026-08-14.mov",
-                    "Old exports",
-                    "Archive.zip",
-                    "Untitled",
-                ],
-            };
-            let steps = 70;
-            for step in 1..=steps {
-                let t = step as f64 / steps as f64;
-                let left = keep + ((start - keep) as f64 * (1.0 - t)) as u64;
-                let removed = progress.bytes(category) - left;
-                progress.remove(category, removed);
-                let dir = if target == Cleanable::Caches {
-                    "~/Library/Caches"
-                } else {
-                    "~/.Trash"
-                };
-                *progress.current.lock().unwrap() = format!("{dir}/{}", names[(t * 3.99) as usize]);
-                thread::sleep(Duration::from_millis(18));
-            }
-            progress.done.store(true, Relaxed);
+            // Detection takes a moment after the scan on a real disk too.
+            thread::sleep(Duration::from_millis(600));
+            progress.set_items(clutter::demo());
         });
     }
 }

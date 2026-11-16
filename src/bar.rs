@@ -198,13 +198,13 @@ impl Rng {
     }
 }
 
-/// Advances particles and emits new ones from the right edge of a segment
-/// that is being cleared, `x` and `height` in points.
+/// Advances particles and emits new ones from each rectangle (left, top,
+/// right, bottom in points) being cleared, at `rate` per second each.
 pub fn step_particles(
     particles: &mut Vec<Particle>,
     rng: &mut Rng,
     dt: f32,
-    emit: Option<(f32, f32, Tone)>,
+    emit: &[([f32; 4], Tone)],
     rate: f32,
 ) {
     for p in particles.iter_mut() {
@@ -216,23 +216,22 @@ pub fn step_particles(
     }
     particles.retain(|p| p.life > 0.0);
 
-    let Some((x, height, tone)) = emit else {
-        return;
-    };
-    let count = (rate * dt + rng.next()).floor() as usize;
-    for _ in 0..count {
-        let max_life = rng.range(0.45, 1.1);
-        let white = rng.next();
-        particles.push(Particle {
-            x: x - rng.range(0.0, CELL * 3.0),
-            y: rng.range(2.0, height - 2.0),
-            vx: rng.range(-14.0, 30.0),
-            vy: rng.range(-75.0, -15.0),
-            life: max_life,
-            max_life,
-            color: tone
-                .shade(rng.range(0.6, 0.85))
-                .mix(Rgba::WHITE, if white > 0.7 { 0.7 } else { 0.0 }),
-        });
+    for &([x0, y0, x1, y1], tone) in emit {
+        let count = (rate * dt + rng.next()).floor() as usize;
+        for _ in 0..count {
+            let max_life = rng.range(0.45, 1.1);
+            let white = rng.next();
+            particles.push(Particle {
+                x: rng.range(x0, x1),
+                y: rng.range(y0, y1),
+                vx: rng.range(-14.0, 30.0),
+                vy: rng.range(-75.0, -15.0),
+                life: max_life,
+                max_life,
+                color: tone
+                    .shade(rng.range(0.6, 0.85))
+                    .mix(Rgba::WHITE, if white > 0.7 { 0.7 } else { 0.0 }),
+            });
+        }
     }
 }

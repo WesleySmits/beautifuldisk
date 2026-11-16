@@ -13,16 +13,16 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::bar::{self, Bar, Particle, Rng, Segment};
-use crate::disk::{self, Category, Cleanable, Progress, Report, Volume};
+use crate::clutter::{self, Item};
+use crate::disk::{self, Category, Progress, Report, Volume};
+use crate::sound::{Sound, Ticker};
+use crate::treemap::{self, Rect};
 
 const BG: u32 = 0x161618;
 const FG: u32 = 0xededef;
 const MUTED: u32 = 0x8b8b90;
 const LINE: u32 = 0x26262a;
 const OK: u32 = 0x4ccb76;
-
-/// Below this a category is not worth offering to clear.
-const WORTH_CLEARING: u64 = 500_000_000;
 
 fn tone(category: Category) -> Tone {
     match category {
@@ -79,7 +79,7 @@ fn tilde(path: &str) -> String {
 enum Phase {
     Scanning,
     Idle,
-    Clearing(Cleanable),
+    Clearing,
 }
 
 pub struct Card {
@@ -94,10 +94,21 @@ pub struct Card {
     glow: [f32; 9],
     edge_strength: f32,
     hover: Option<Category>,
-    cleared: Vec<Cleanable>,
-    /// Size of the category being cleared when clearing started.
-    clearing_from: u64,
     freed: u64,
+    /// Cleanup items once detection finishes, with what the UI tracks per item.
+    items: Option<Arc<Vec<Item>>>,
+    selected: Vec<bool>,
+    /// Bytes on screen per item, easing toward what is left of it.
+    item_shown: Vec<f64>,
+    item_glow: Vec<f32>,
+    /// Each item's size when found: fixes the treemap's shape.
+    item_size: Vec<f64>,
+    /// Size of all items when found.
+    items_total: f64,
+    hover_item: Option<usize>,
+    /// When the items arrived, for their staggered sweep in.
+    items_at: f32,
+    clean_bounds: Rc<Cell<Bounds<Pixels>>>,
     particles: Vec<Particle>,
     rng: Rng,
     time: f32,
@@ -112,6 +123,10 @@ pub struct Card {
     pill: [f32; 3],
     pill_velocity: [f32; 3],
     pill_alpha: f32,
+    sound: Sound,
+    ticker: Ticker,
+    /// The item being cleared last frame, to whoosh when it is done.
+    was_cleaning: u64,
 }
 
 /// Legend geometry, shared by the layout and the gliding highlight.
@@ -145,9 +160,16 @@ impl Card {
             glow: [1.0; 9],
             edge_strength: 0.0,
             hover: None,
-            cleared: Vec::new(),
-            clearing_from: 0,
             freed: 0,
+            items: None,
+            selected: Vec::new(),
+            item_shown: Vec::new(),
+            item_glow: Vec::new(),
+            item_size: Vec::new(),
+            items_total: 0.0,
+            hover_item: None,
+            items_at: 0.0,
+            clean_bounds: Rc::default(),
             particles: Vec::new(),
             rng: Rng::new(),
             time: 0.0,
@@ -158,6 +180,9 @@ impl Card {
             pill: [0.0; 3],
             pill_velocity: [0.0; 3],
             pill_alpha: 0.0,
+            sound: Sound::new(),
+            ticker: Ticker::default(),
+            was_cleaning: 0,
         };
         card.scan();
         card
@@ -175,7 +200,9 @@ impl Card {
         self.target = [0.0; 9];
         self.shown = [0.0; 9];
         self.hover = None;
-        self.cleared.clear();
+        self.hover_item = None;
+        self.items = None;
+        self.item_shown.clear();
         self.freed = 0;
         if self.demo {
             disk::demo::scan(self.progress.clone());
@@ -184,25 +211,43 @@ impl Card {
         }
     }
 
-    fn clear(&mut self, target: Cleanable) {
-        self.phase = Phase::Clearing(target);
-        self.clearing_from = self.progress.bytes(target.category());
-        self.hover = None;
-        let progress = self.progress.clone();
-        if self.demo {
-            disk::demo::clean(target, progress);
-        } else {
-            disk::clean(target, progress);
+    fn clear(&mut self) {
+        let Some(items) = self.items.clone() else {
+            return;
+        };
+        let chosen: Vec<usize> = (0..items.len())
+            .filter(|&i| self.selected[i] && items[i].left() > 0)
+            .collect();
+        if chosen.is_empty() {
+            return;
         }
+        self.phase = Phase::Clearing;
+        self.hover = None;
+        self.hover_item = None;
+        clutter::clean(items, chosen, self.progress.clone(), self.demo);
     }
 
-    fn suggestion(&self) -> Option<Cleanable> {
-        if let Phase::Clearing(target) = self.phase {
-            return Some(target);
-        }
-        Cleanable::ALL.into_iter().find(|c| {
-            !self.cleared.contains(c) && self.progress.bytes(c.category()) >= WORTH_CLEARING
-        })
+    /// Items still worth a chip: everything until cleared away.
+    fn visible(&self) -> Vec<usize> {
+        let Some(items) = &self.items else {
+            return Vec::new();
+        };
+        (0..items.len())
+            .filter(|&i| items[i].left() > 0 || self.item_shown[i] > 1e6)
+            .collect()
+    }
+
+    fn selected_bytes(&self) -> f64 {
+        self.visible()
+            .into_iter()
+            .filter(|&i| self.selected[i])
+            .map(|i| self.item_shown[i])
+            .sum()
+    }
+
+    /// How full the cleanup bar is on screen, 0 to 1.
+    fn items_fill(&self) -> f64 {
+        self.item_shown.iter().sum::<f64>() / self.items_total.max(1.0)
     }
 
     fn used_shown(&self) -> f64 {
@@ -241,13 +286,24 @@ impl Card {
                         (self.volume.used as f64 - known).max(0.0);
                     self.phase = Phase::Idle;
                 }
-                Phase::Clearing(target) => {
-                    self.cleared.push(target);
+                Phase::Clearing => {
+                    // What was cleared is gone; what was kept stays, unselected.
+                    if let Some(items) = &self.items {
+                        for (i, item) in items.iter().enumerate() {
+                            if self.selected[i] && item.left() > 0 {
+                                self.selected[i] = false;
+                            }
+                        }
+                    }
                     self.phase = Phase::Idle;
                 }
                 Phase::Idle => {}
             }
         }
+
+        let total = (self.volume.total as f64).max(1.0);
+        let used_before = self.used_shown() / total;
+        let items_before = self.items_fill();
 
         let mut moving = false;
         for i in 0..9 {
@@ -314,28 +370,120 @@ impl Card {
             self.pill_alpha = alpha_to;
         }
 
+        if self.items.is_none()
+            && self.phase == Phase::Idle
+            && let Some(items) = self.progress.items()
+        {
+            self.selected = items.iter().map(|i| i.on).collect();
+            self.item_shown = vec![0.0; items.len()];
+            self.item_glow = vec![0.0; items.len()];
+            self.item_size = items.iter().map(|i| i.left() as f64).collect();
+            self.items_total = self.item_size.iter().sum();
+            self.items_at = self.time;
+            self.items = Some(items);
+        }
+        let cleaning = self.progress.cleaning();
+        if let Some(items) = &self.items {
+            for (i, item) in items.iter().enumerate() {
+                let to = item.left() as f64;
+                // Items sweep in one after another, left to right.
+                let waiting = self.time - self.items_at < i as f32 * 0.035;
+                if waiting {
+                    moving = true;
+                } else if self.item_shown[i] != to {
+                    self.item_shown[i] =
+                        approach(self.item_shown[i] as f32, to as f32, dt, 0.08) as f64;
+                    if (self.item_shown[i] - to).abs() < 2e6 {
+                        self.item_shown[i] = to;
+                    } else {
+                        moving = true;
+                    }
+                }
+                let glow_to = match (self.hover_item, busy(cleaning, i)) {
+                    (_, true) => 1.0,
+                    (Some(h), _) if h == i && !self.selected[i] => 0.6,
+                    _ if !self.selected[i] => 0.06,
+                    (Some(h), _) if h == i => 1.0,
+                    (Some(_), _) => 0.3,
+                    _ => 0.62,
+                };
+                self.item_glow[i] = approach(self.item_glow[i], glow_to, dt, 0.06);
+                if (self.item_glow[i] - glow_to).abs() > 0.005 {
+                    moving = true;
+                } else {
+                    self.item_glow[i] = glow_to;
+                }
+            }
+        }
+        // One ticker for both bars, following whichever moved more, so
+        // clearing (which shrinks both) does not tick twice.
+        let used_after = self.used_shown() / total;
+        let items_after = self.items_fill();
+        let (delta, fill) = if (items_after - items_before).abs() > (used_after - used_before).abs()
+        {
+            (items_after - items_before, items_after)
+        } else {
+            (used_after - used_before, used_after)
+        };
+        self.ticker.step(&self.sound, delta as f32, dt, fill as f32);
+        // An item that just finished.
+        if self.was_cleaning & !cleaning != 0 {
+            self.sound.whoosh();
+        }
+        self.was_cleaning = cleaning;
+
+        // Keep frames coming while detection runs, so its result shows up.
+        if self.items.is_none() && self.phase == Phase::Idle {
+            moving = true;
+        }
+
         let edge_to = if working { 1.0 } else { 0.0 };
         self.edge_strength = approach(self.edge_strength, edge_to, dt, 0.12);
         if (self.edge_strength - edge_to).abs() > 0.005 {
             moving = true;
         }
 
-        let bounds = self.bar_bounds.get();
-        let width = f32::from(bounds.size.width);
-        let emit = match self.phase {
-            Phase::Clearing(target) if width > 0.0 => {
-                let (_, end) = self.span(target.category());
-                Some((
-                    end * width,
-                    f32::from(bounds.size.height),
-                    tone(target.category()),
-                ))
+        // Dust rises off every tile being cleared.
+        let mut emit = Vec::new();
+        if cleaning != 0
+            && let Some(items) = &self.items
+        {
+            for (i, t) in self.tiles().into_iter().enumerate() {
+                if busy(cleaning, i) && t.w > 2.0 && t.h > 2.0 {
+                    emit.push(([t.x, t.y, t.x + t.w, t.y + t.h], items[i].tone));
+                }
             }
-            _ => None,
-        };
-        bar::step_particles(&mut self.particles, &mut self.rng, dt, emit, 260.0);
+        }
+        // Spread the dust so many tiles at once don't flood the screen.
+        let rate = 260.0 / (emit.len().max(1) as f32).sqrt();
+        bar::step_particles(&mut self.particles, &mut self.rng, dt, &emit, rate);
 
         working || moving || !self.particles.is_empty()
+    }
+
+    /// What each tile's area follows: the item's size until its intro is
+    /// done, then what is on screen, so a cleared tile shrinks away.
+    fn weights(&self) -> Vec<f64> {
+        let Some(items) = &self.items else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .zip(&self.item_shown)
+            .map(|(item, &shown)| shown.max(item.left() as f64))
+            .collect()
+    }
+
+    /// Tile rectangles in the treemap's own coordinates.
+    fn tiles(&self) -> Vec<Rect> {
+        let size = self.clean_bounds.get().size;
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: f32::from(size.width),
+            h: f32::from(size.height),
+        };
+        treemap::layout(&self.item_size, &self.weights(), area)
     }
 
     /// Start and end of a category's segment as fractions of the bar.
@@ -362,8 +510,11 @@ impl Card {
                 }
             })
             .collect();
-        let edge = match self.phase {
-            Phase::Clearing(target) => Some(target.category() as usize),
+        let cleaning = self.progress.cleaning();
+        let edge = match &self.items {
+            Some(items) if cleaning != 0 => {
+                Some(items[cleaning.trailing_zeros() as usize].category as usize)
+            }
             _ => (0..9).rev().find(|&i| self.shown[i] > 0.0),
         };
         Bar {
@@ -441,8 +592,7 @@ impl Card {
         };
         match self.phase {
             Phase::Scanning => return path("Calculating"),
-            Phase::Clearing(Cleanable::Caches) => return path("Clearing caches"),
-            Phase::Clearing(Cleanable::Trash) => return path("Emptying the Trash"),
+            Phase::Clearing => return path("Clearing"),
             Phase::Idle => {}
         }
         let available = gb(self.volume.total as f64 - self.used_shown());
@@ -491,9 +641,228 @@ impl Card {
             .into_any_element()
     }
 
-    fn footer(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The line under the cleanup headline: the hovered item, what is being
+    /// cleared, or what the disk looks like afterwards.
+    fn clean_status(&self, items: &[Item]) -> AnyElement {
+        let muted = rgb(MUTED);
+        let item_line = |i: usize, text: String| {
+            let item = &items[i];
+            h_flex()
+                .gap_2()
+                .min_w_0()
+                .children(
+                    item.icon
+                        .clone()
+                        .map(|icon| img(icon).size(px(14.0)).flex_none()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(FG))
+                        .child(item.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(muted)
+                        .child(gb(self.item_shown[i])),
+                )
+                .child(div().min_w_0().truncate().text_color(muted).child(text))
+                .into_any_element()
+        };
+        let cleaning = self.progress.cleaning();
+        if cleaning.count_ones() == 1 {
+            return item_line(
+                cleaning.trailing_zeros() as usize,
+                tilde(&self.progress.current()),
+            );
+        }
+        if cleaning != 0 {
+            return h_flex()
+                .gap_2()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(FG))
+                        .child(format!("Clearing {} items", cleaning.count_ones())),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(muted)
+                        .child(tilde(&self.progress.current())),
+                )
+                .into_any_element();
+        }
+        if let Some(i) = self.hover_item {
+            return item_line(i, items[i].detail.clone());
+        }
+        let free = self.volume.total as f64 - self.used_shown();
+        div()
+            .text_color(muted)
+            .child(format!(
+                "{} available after clearing",
+                gb(free + self.selected_bytes())
+            ))
+            .into_any_element()
+    }
+
+    /// The treemap: tiles painted on one canvas, with an invisible div per
+    /// tile on top for hover, clicks and the label.
+    fn treemap(&self, items: &[Item], cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        const DUST: f32 = 60.0;
+        let tiles = self.tiles();
+        let cleaning = self.progress.cleaning();
+        let weights = self.weights();
+        let inset = |r: Rect| Rect {
+            x: r.x + treemap::GAP / 2.0,
+            y: r.y + treemap::GAP / 2.0,
+            w: (r.w - treemap::GAP).max(0.0),
+            h: (r.h - treemap::GAP).max(0.0),
+        };
+        let painted: Vec<(Rect, treemap::Tile)> = items
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| tiles[i].w >= treemap::GAP + 2.0 && tiles[i].h >= treemap::GAP + 2.0)
+            .map(|(i, item)| {
+                let tile = treemap::Tile {
+                    tone: item.tone,
+                    on: self.selected[i],
+                    glow: self.item_glow[i],
+                    reveal: (self.item_shown[i] / weights[i].max(1.0)) as f32,
+                    busy: busy(cleaning, i),
+                };
+                (inset(tiles[i]), tile)
+            })
+            .collect();
+
+        let idle = self.phase == Phase::Idle;
+        let mut labels = Vec::new();
+        for (i, item) in items.iter().enumerate() {
+            let r = inset(tiles[i]);
+            if r.w < 2.0 || r.h < 2.0 {
+                continue;
+            }
+            let on = self.selected[i];
+            let text = rgb(if on { FG } else { 0x77777c });
+            let small = r.w < 96.0 || r.h < 56.0;
+            let tiny = r.w < 34.0 || r.h < 30.0;
+            let icon = item.icon.clone().map(|icon| {
+                img(icon)
+                    .size(px(if small { 14.0 } else { 17.0 }))
+                    .flex_none()
+                    .grayscale(!on)
+                    .opacity(if on { 1.0 } else { 0.5 })
+            });
+            let label =
+                v_flex()
+                    .size_full()
+                    .justify_between()
+                    .p(px(if small { 6.0 } else { 10.0 }))
+                    .overflow_hidden()
+                    .when(!tiny, |label| {
+                        label
+                            .child(h_flex().gap(px(7.0)).min_w_0().children(icon).when(
+                                !small,
+                                |row| {
+                                    row.child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(12.5))
+                                            .text_color(text)
+                                            .child(item.name.clone()),
+                                    )
+                                },
+                            ))
+                            .when(r.h >= 44.0 && r.w >= 58.0, |label| {
+                                label.child(
+                                    div()
+                                        .whitespace_nowrap()
+                                        .font_family("Menlo")
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_size(px(if small { 10.5 } else { 14.0 }))
+                                        .text_color(text)
+                                        .child(gb(self.item_shown[i])),
+                                )
+                            })
+                    });
+            labels.push(
+                div()
+                    .id(("tile", i))
+                    .absolute()
+                    .left(px(r.x))
+                    .top(px(r.y))
+                    .w(px(r.w))
+                    .h(px(r.h))
+                    .when(idle, |tile| tile.cursor_pointer())
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if this.phase != Phase::Idle {
+                            return;
+                        }
+                        if *hovered {
+                            this.hover_item = Some(i);
+                        } else if this.hover_item == Some(i) {
+                            this.hover_item = None;
+                        }
+                        cx.notify();
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.phase == Phase::Idle {
+                            this.selected[i] = !this.selected[i];
+                            cx.notify();
+                        }
+                    }))
+                    .child(label),
+            );
+        }
+
+        let clean_bounds = self.clean_bounds.clone();
+        let particles = self.particles.clone();
+        let time = self.time;
+        div()
+            .relative()
+            .flex_1()
+            .min_h(px(160.0))
+            .w_full()
+            .child(
+                canvas(
+                    move |bounds, _, _| clean_bounds.set(bounds),
+                    move |bounds, _, window, _| {
+                        for (r, tile) in &painted {
+                            let at = Bounds::new(
+                                bounds.origin + point(px(r.x), px(r.y)),
+                                size(px(r.w), px(r.h)),
+                            );
+                            treemap::paint(tile, at, bounds.origin, time, window);
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .children(labels)
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let origin = bounds.origin + point(px(0.0), px(DUST));
+                        bar::paint_particles(&particles, origin, window);
+                    },
+                )
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .top(px(-DUST)),
+            )
+    }
+
+    fn cleanup(&self, cx: &mut Context<Self>) -> AnyElement {
         let row = h_flex().h(px(30.0)).gap_2().items_center();
-        if self.phase == Phase::Scanning {
+        let Some(items) = self.items.clone() else {
             return row
                 .child(Spinner::new().small().color(rgb(MUTED).into()))
                 .child(
@@ -502,8 +871,9 @@ impl Card {
                         .child("Looking for things you can clear"),
                 )
                 .into_any_element();
-        }
-        let Some(target) = self.suggestion() else {
+        };
+        let visible = self.visible();
+        if visible.is_empty() {
             return row
                 .child(Icon::new(IconName::Check).size_3p5().text_color(rgb(OK)))
                 .child(
@@ -512,47 +882,58 @@ impl Card {
                         .child("Nothing else is worth clearing right now."),
                 )
                 .into_any_element();
-        };
-        let category = target.category();
-        // While clearing, keep the sentence about what was there when it started.
-        let bytes = gb(match self.phase {
-            Phase::Clearing(_) => self.clearing_from,
-            _ => self.progress.bytes(category),
-        } as f64);
-        let (text, action) = match target {
-            Cleanable::Caches => (
-                format!("Caches are using {bytes}. Apps rebuild them when they need them."),
-                "Clear caches",
-            ),
-            Cleanable::Trash => (
-                format!("The Trash is holding {bytes} of things you've already deleted."),
-                "Empty Trash",
-            ),
-        };
-        row.child(
-            Icon::new(icon(category))
-                .size_3p5()
-                .text_color(dither_gpui::hsla(tone(category).base())),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_color(rgb(FG))
-                .child(text),
-        )
-        .child(
-            Button::new("clean")
-                .small()
-                .label(action)
-                .disabled(self.phase != Phase::Idle)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.clear(target);
-                    cx.notify();
-                })),
-        )
-        .into_any_element()
+        }
+
+        let selected = self.selected_bytes();
+        let idle = self.phase == Phase::Idle;
+        let header = h_flex()
+            .items_start()
+            .justify_between()
+            .gap_4()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .items_baseline()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .text_size(px(20.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(gb(selected)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(MUTED))
+                                    .child("can go"),
+                            ),
+                    )
+                    .child(div().h(px(18.0)).child(self.clean_status(&items))),
+            )
+            .child(
+                Button::new("clear")
+                    .primary()
+                    .small()
+                    .label("Clear")
+                    .disabled(!idle || selected < 1e6)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.clear();
+                        cx.notify();
+                    })),
+            );
+
+        let map = self.treemap(&items, cx);
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .gap_3()
+            .child(header)
+            .child(map)
+            .into_any_element()
     }
 }
 
@@ -606,9 +987,7 @@ impl Render for Card {
             );
 
         let model = self.bar();
-        let particles = self.particles.clone();
         let bar_bounds = self.bar_bounds.clone();
-        const DUST: f32 = 80.0;
         let bar = div()
             .id("bar")
             .relative()
@@ -637,20 +1016,6 @@ impl Render for Card {
                 )
                 .absolute()
                 .size_full(),
-            )
-            .child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        let origin = bounds.origin + point(px(0.0), px(DUST));
-                        bar::paint_particles(&particles, origin, window);
-                    },
-                )
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(-DUST))
-                .h(px(54.0 + DUST)),
             );
 
         let legend_bounds = self.legend_bounds.clone();
@@ -724,11 +1089,13 @@ impl Render for Card {
             .child(header)
             .child(bar)
             .child(legend)
-            .child(
-                v_flex()
-                    .gap_3()
-                    .child(div().h(px(1.0)).bg(rgb(LINE)))
-                    .child(self.footer(cx)),
-            )
+            .child(div().flex_none().h(px(1.0)).bg(rgb(LINE)))
+            .child(self.cleanup(cx))
     }
+}
+
+/// Whether item `i` is set in a [`Progress::cleaning`] mask.
+fn busy(mask: u64, i: usize) -> bool {
+    1u64.checked_shl(i as u32)
+        .is_some_and(|bit| mask & bit != 0)
 }

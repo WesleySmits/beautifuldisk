@@ -56,7 +56,7 @@ pub struct Tree {
     event_id: u64,
 }
 
-fn pool() -> &'static rayon::ThreadPool {
+pub(crate) fn pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
         // Directory reads block in the kernel; a few extra threads keep cores busy.
@@ -396,6 +396,107 @@ impl Tree {
             }
         }
         report
+    }
+}
+
+/// Read-only lookups over a finished tree: folder sizes, subfolders and
+/// searches by name.
+pub struct Index<'a> {
+    tree: &'a Tree,
+    children: Children,
+    roots: Vec<u32>,
+    /// Bytes of each folder including everything below it.
+    size: Vec<u64>,
+}
+
+impl Tree {
+    pub fn index(&self) -> Index<'_> {
+        let nodes = &self.nodes;
+        let mut size: Vec<u64> = nodes
+            .iter()
+            .map(|n| if n.alive { n.own } else { 0 })
+            .collect();
+        // Children always come after their parent, so one backward pass
+        // adds every folder into its parent.
+        for i in (0..nodes.len()).rev() {
+            let parent = nodes[i].parent;
+            if parent != NONE && nodes[i].alive {
+                size[parent as usize] += size[i];
+            }
+        }
+        Index {
+            tree: self,
+            children: Children::new(nodes),
+            roots: (0..nodes.len() as u32)
+                .filter(|&i| nodes[i as usize].parent == NONE && nodes[i as usize].alive)
+                .collect(),
+            size,
+        }
+    }
+}
+
+impl Index<'_> {
+    fn at(&self, path: &Path) -> Option<u32> {
+        match self.tree.find(&self.roots, &self.children, path)? {
+            (index, true) => Some(index),
+            _ => None,
+        }
+    }
+
+    /// Size of the folder at `path`, 0 if it isn't in the tree.
+    pub fn size(&self, path: &Path) -> u64 {
+        self.at(path).map_or(0, |i| self.size[i as usize])
+    }
+
+    /// Subfolders of `path` with their sizes.
+    pub fn subdirs(&self, path: &Path) -> Vec<(PathBuf, u64)> {
+        let Some(index) = self.at(path) else {
+            return Vec::new();
+        };
+        self.children
+            .of(index)
+            .iter()
+            .map(|&c| {
+                let name = OsStr::from_bytes(&self.tree.nodes[c as usize].name);
+                (path.join(name), self.size[c as usize])
+            })
+            .collect()
+    }
+
+    /// Topmost folders under `bases` that `matches` accepts, given the
+    /// folder's name and its parent's name. Nothing below a match is visited.
+    pub fn search(
+        &self,
+        bases: &[PathBuf],
+        matches: impl Fn(&[u8], &[u8], bool) -> bool,
+    ) -> Vec<(PathBuf, u64)> {
+        let nodes = &self.tree.nodes;
+        // 0: outside every base, 1: inside a base, 2: inside a match.
+        let mut state = vec![0u8; nodes.len()];
+        for base in bases {
+            if let Some(i) = self.at(base) {
+                state[i as usize] = 1;
+            }
+        }
+        let mut found = Vec::new();
+        for (i, node) in nodes.iter().enumerate() {
+            if !node.alive {
+                continue;
+            }
+            if node.parent != NONE {
+                let inherited = state[node.parent as usize];
+                state[i] = state[i].max(inherited);
+            }
+            if state[i] != 1 || node.parent == NONE {
+                continue;
+            }
+            let parent = &nodes[node.parent as usize].name;
+            if matches(&node.name, parent, node.tags & BUILD_OUTPUT != 0) {
+                state[i] = 2;
+                found.push((path_of(nodes, i as u32), self.size[i]));
+            }
+        }
+        found
     }
 }
 

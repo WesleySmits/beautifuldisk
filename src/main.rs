@@ -1,9 +1,13 @@
 mod bar;
 mod bulk;
 mod card;
+mod clutter;
 mod disk;
 mod fsevents;
+mod icons;
+mod sound;
 mod tree;
+mod treemap;
 
 use std::borrow::Cow;
 
@@ -60,8 +64,16 @@ fn main() {
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
 
+        // Room for the cleanup list, but never more than 70% of the screen.
+        let screen = cx
+            .primary_display()
+            .map_or(size(px(1440.0), px(900.0)), |d| d.bounds().size);
+        let window = size(
+            px(720.0).min(screen.width * 0.7),
+            px(680.0).min(screen.height * 0.7),
+        );
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(600.0), px(300.0)), cx)),
+            window_bounds: Some(WindowBounds::centered(window, cx)),
             titlebar: None,
             is_resizable: false,
             ..Default::default()
