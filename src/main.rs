@@ -8,6 +8,7 @@ mod disk;
 mod fsevents;
 #[cfg(target_os = "macos")]
 mod grant;
+mod history;
 /// Linux has no change journal that outlives the app, so every scan is full.
 #[cfg(not(target_os = "macos"))]
 mod fsevents {

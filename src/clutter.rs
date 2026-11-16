@@ -15,6 +15,7 @@ use rayon::prelude::*;
 
 use crate::access;
 use crate::disk::{self, Category, Progress};
+use crate::history;
 use crate::icons::{self, Logo, Source};
 use crate::tree::{self, Index};
 
@@ -34,6 +35,8 @@ pub struct Item {
     pub pick: Pick,
     left: AtomicU64,
     how: How,
+    /// The app whose cache this is, which must be closed for it to clear.
+    app: Option<&'static OpenApp>,
 }
 
 /// How safe an item is to clear, which decides where it shows.
@@ -52,6 +55,9 @@ pub enum Pick {
 enum How {
     /// Empty these folders, keeping the folders. Skips the listed children.
     Contents(Vec<PathBuf>, Vec<PathBuf>),
+    /// Files in these folders not changed for this long. Skips the listed
+    /// children.
+    Old(Vec<(PathBuf, Duration)>, Vec<PathBuf>),
     /// Delete these folders or files outright.
     Paths(Vec<(PathBuf, u64)>),
     /// Git worktrees, removed with `git worktree remove`.
@@ -78,6 +84,16 @@ impl Item {
 
     /// Exactly what clearing this item touches, for the confirmation.
     pub fn targets(&self) -> Vec<Target> {
+        let mut targets = self.how_targets();
+        if let Some(app) = self.app {
+            for t in &mut targets {
+                t.how = format!("{}, unless {} is open", t.how, app.name);
+            }
+        }
+        targets
+    }
+
+    fn how_targets(&self) -> Vec<Target> {
         let each = |list: &[(PathBuf, u64)], how: &'static str| {
             list.iter()
                 .map(|(p, _)| Target {
@@ -100,6 +116,14 @@ impl Item {
                             n => format!("Everything inside but {n} folders listed elsewhere"),
                         },
                     }
+                })
+                .collect(),
+            How::Old(dirs, _) => dirs
+                .iter()
+                .filter(|(d, _)| d.is_dir())
+                .map(|(d, age)| Target {
+                    what: d.display().to_string(),
+                    how: format!("Files older than {} days", age.as_secs() / 86_400),
                 })
                 .collect(),
             How::Paths(list) => each(list, "Deleted"),
@@ -254,7 +278,7 @@ const CACHES: &[Spec] = &[
     spec(
         "Yarn cache",
         AGAIN,
-        &["Library/Caches/Yarn", ".yarn/berry/cache", ".cache/yarn"],
+        &["Library/Caches/Yarn", ".cache/yarn"],
         200.0,
         Source::Logo(Logo::Yarn),
         Pick::Dev,
@@ -321,11 +345,11 @@ const CACHES: &[Spec] = &[
     ),
     spec(
         "Playwright browsers",
-        AGAIN,
+        "Reinstalled with playwright install.",
         &["Library/Caches/ms-playwright", ".cache/ms-playwright"],
         140.0,
         Source::File,
-        Pick::On,
+        Pick::Off,
     ),
     spec(
         "Chrome cache",
@@ -381,11 +405,11 @@ const CACHES: &[Spec] = &[
     ),
     spec(
         "Deno cache",
-        AGAIN,
+        "Also holds what sites saved with Deno. Downloaded again when needed.",
         &["Library/Caches/deno", ".cache/deno"],
         170.0,
         Source::File,
-        Pick::Dev,
+        Pick::Off,
     ),
     spec(
         "Composer cache",
@@ -405,7 +429,7 @@ const CACHES: &[Spec] = &[
         &[".pub-cache/hosted", ".pub-cache/git"],
         200.0,
         Source::File,
-        Pick::Dev,
+        Pick::Off,
     ),
     spec(
         "Bazel cache",
@@ -447,7 +471,7 @@ const CACHES: &[Spec] = &[
         ],
         150.0,
         Source::File,
-        Pick::On,
+        Pick::Off,
     ),
     spec(
         "Electron downloads",
@@ -542,7 +566,7 @@ const CACHES: &[Spec] = &[
         &[".nuget/packages"],
         265.0,
         Source::File,
-        Pick::Dev,
+        Pick::Off,
     ),
     spec(
         "Haskell packages",
@@ -550,7 +574,7 @@ const CACHES: &[Spec] = &[
         &[".cabal/packages", ".stack/pantry"],
         280.0,
         Source::File,
-        Pick::Dev,
+        Pick::Off,
     ),
     spec(
         "Ruby gem cache",
@@ -664,6 +688,106 @@ const CACHES: &[Spec] = &[
         Pick::On,
     ),
 ];
+
+/// An app whose cache breaks if cleared while it runs, and how to spot it
+/// in a process's command line.
+struct OpenApp {
+    name: &'static str,
+    /// The items it owns.
+    items: &'static [&'static str],
+    processes: &'static [&'static str],
+}
+
+const OPEN_APPS: &[OpenApp] = &[
+    OpenApp {
+        name: "Chrome",
+        items: &["Chrome cache"],
+        processes: &["Google Chrome.app/", "/opt/google/chrome/", "/chromium"],
+    },
+    OpenApp {
+        name: "Arc",
+        items: &["Arc cache"],
+        processes: &["Arc.app/"],
+    },
+    OpenApp {
+        name: "Brave",
+        items: &["Brave cache"],
+        processes: &["Brave Browser.app/", "/brave"],
+    },
+    OpenApp {
+        name: "Firefox",
+        items: &["Firefox cache"],
+        processes: &["Firefox.app/", "/firefox"],
+    },
+    OpenApp {
+        name: "Safari",
+        items: &["Safari cache"],
+        processes: &["Safari.app/"],
+    },
+    OpenApp {
+        name: "Xcode",
+        items: &["Xcode build data", "Xcode caches", "Xcode previews"],
+        processes: &["Xcode.app/Contents/MacOS/Xcode"],
+    },
+    OpenApp {
+        name: "Simulator",
+        items: &["Simulator caches"],
+        processes: &["Simulator.app/"],
+    },
+    OpenApp {
+        name: "VS Code",
+        items: &["VS Code caches"],
+        processes: &[
+            "Visual Studio Code.app/",
+            "/usr/share/code/",
+            "/opt/visual-studio-code/",
+        ],
+    },
+];
+
+impl OpenApp {
+    fn open(&self) -> bool {
+        self.processes.iter().any(|p| {
+            Command::new("/usr/bin/pgrep")
+                .args(["-f", p])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+    }
+}
+
+/// Caches that break something when deleted: licenses, text recognition,
+/// audio, HomeKit, System Settings, or an endless rewrite loop. App caches
+/// leaves them alone, and so does this app's own data.
+fn protected_cache(name: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "beautifuldisk",
+        "com.apple.containermanagerd",
+        "com.apple.homed",
+        "com.apple.HomeKit",
+        "com.apple.ap.adprivacyd",
+        "com.apple.siriactionsd.ShortcutsSandboxCache",
+        "com.apple.systempreferences",
+        "com.apple.Settings",
+        "com.apple.controlcenter",
+        "com.apple.finder",
+        "com.apple.dock",
+        "FamilyCircle",
+        "GIPPseudonymousID",
+        "CCTClearcutLogger",
+    ];
+    let lower = name.to_lowercase();
+    NAMES.contains(&name)
+        || name.starts_with("com.apple.WorkflowKit.BackgroundShortcutRunner")
+        || name.starts_with("com.apple.audio")
+        || lower.contains("coreaudio")
+        || lower.contains("adobe")
+        || name.contains(E5RT)
+}
+
+/// Compiled models apps load at run time. Deleting one under a running app
+/// breaks text recognition until it restarts, so it is kept wherever it is.
+const E5RT: &str = "com.apple.e5rt.e5bundlecache";
 
 /// Where coding agents keep their worktrees.
 const AGENTS: &[(&str, &str, Source)] = &[
@@ -790,7 +914,12 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
     let skip: Vec<_> = index
         .subdirs(&caches)
         .into_iter()
-        .filter(|(child, _)| claimed.iter().any(|c| c.starts_with(child)))
+        .filter(|(child, _)| {
+            claimed.iter().any(|c| c.starts_with(child))
+                || child
+                    .file_name()
+                    .is_some_and(|n| protected_cache(&n.to_string_lossy()))
+        })
         .collect();
     found.push(Found {
         name: "App caches".into(),
@@ -804,6 +933,44 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
             .size(&caches)
             .saturating_sub(skip.iter().map(|(_, b)| b).sum()),
         how: How::Contents(vec![caches], skip.into_iter().map(|(p, _)| p).collect()),
+    });
+
+    // Logs and window state, only once nothing has touched them in a while.
+    const DAY: Duration = Duration::from_secs(86_400);
+    let logs = vec![
+        (home.join("Library/Logs"), 7 * DAY),
+        (
+            home.join("Library/Application Support/CrashReporter"),
+            30 * DAY,
+        ),
+    ];
+    // Codex keeps its own history in its logs.
+    let keep_logs = vec![home.join("Library/Logs/com.openai.codex")];
+    found.push(Found {
+        name: "Old logs".into(),
+        detail: "Logs older than a week, crash reports older than a month.".into(),
+        hue: 0.0,
+        icon: Source::File,
+        icon_file: Some(logs[0].0.clone()),
+        category: Category::System,
+        pick: Pick::On,
+        bytes: logs
+            .iter()
+            .map(|(dir, age)| old_size(dir, *age, &keep_logs))
+            .sum(),
+        how: How::Old(logs, keep_logs),
+    });
+    let windows = vec![(home.join("Library/Saved Application State"), 30 * DAY)];
+    found.push(Found {
+        name: "Old window state".into(),
+        detail: "Windows apps saved to reopen, untouched for a month.".into(),
+        hue: 0.0,
+        icon: Source::File,
+        icon_file: Some(windows[0].0.clone()),
+        category: Category::System,
+        pick: Pick::On,
+        bytes: old_size(&windows[0].0, windows[0].1, &[]),
+        how: How::Old(windows, Vec::new()),
     });
 
     let projects: Vec<PathBuf> = PROJECTS.iter().map(|p| home.join(p)).collect();
@@ -1043,6 +1210,9 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
     found
         .into_iter()
         .map(|f| Item {
+            app: OPEN_APPS
+                .iter()
+                .find(|a| a.items.contains(&f.name.as_str())),
             icon: icons::load(f.icon, f.icon_file.as_deref()),
             name: f.name,
             detail: f.detail,
@@ -1153,8 +1323,12 @@ pub fn clean(items: Arc<Vec<Item>>, chosen: Vec<usize>, progress: Arc<Progress>,
                             .fetch_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(bytes)));
                         progress.remove(item.category, bytes);
                     };
+                    let before = item.left();
+                    let open = item.app.filter(|_| !demo).filter(|a| a.open());
                     if demo {
                         demo_clean(item, &freed);
+                    } else if open.is_some() {
+                        // Left for next time, after the app quits.
                     } else if let Some(guard) = Guard::new(&disk::home()) {
                         let clear = Clear {
                             guard: &guard,
@@ -1162,6 +1336,9 @@ pub fn clean(items: Arc<Vec<Item>>, chosen: Vec<usize>, progress: Arc<Progress>,
                             freed: &freed,
                         };
                         tree::pool().install(|| run(&item.how, &clear));
+                    }
+                    if !demo {
+                        history::record(item, before - item.left(), open.map(|a| a.name));
                     }
                     progress.set_cleaning(i, false);
                 });
@@ -1250,6 +1427,17 @@ fn run(how: &How, clear: &Clear) {
                     .filter(|p| !skip.contains(p))
                     .collect();
                 children.par_iter().for_each(|p| clear.remove(p));
+            }
+        }
+        How::Old(dirs, skip) => {
+            let now = SystemTime::now();
+            for (dir, age) in dirs {
+                let Some(dev) = clear.guard.check(dir) else {
+                    continue;
+                };
+                if fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
+                    remove_old(dir, dev, now - *age, skip, clear);
+                }
             }
         }
         How::Paths(paths) => {
@@ -1510,7 +1698,12 @@ fn remove_all(path: &Path, dev: u64, clear: &Clear) {
     let Ok(md) = fs::symlink_metadata(path) else {
         return;
     };
-    if md.dev() != dev || md.uid() != clear.guard.uid {
+    if md.dev() != dev
+        || md.uid() != clear.guard.uid
+        || path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains(E5RT))
+    {
         return;
     }
     if !md.is_dir() {
@@ -1533,6 +1726,61 @@ fn remove_all(path: &Path, dev: u64, clear: &Clear) {
     let _ = fs::remove_dir(path);
 }
 
+/// Deletes files under `dir` last changed before `cutoff`, and folders that
+/// leaves empty. Keeps `dir` itself and anything in `skip`. Same rules as
+/// [`remove_all`]: no symlinks, no other disks, only the user's files.
+fn remove_old(dir: &Path, dev: u64, cutoff: SystemTime, skip: &[PathBuf], clear: &Clear) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(md) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if skip.contains(&path)
+            || md.dev() != dev
+            || md.uid() != clear.guard.uid
+            || entry.file_name().to_string_lossy().contains(E5RT)
+        {
+            continue;
+        }
+        if md.is_dir() {
+            remove_old(&path, dev, cutoff, skip, clear);
+            // Only succeeds once nothing is left in it.
+            let _ = fs::remove_dir(&path);
+        } else if md.modified().is_ok_and(|m| m < cutoff) {
+            clear.progress.show(&path);
+            if fs::remove_file(&path).is_ok() {
+                (clear.freed)(md.blocks() * 512 / md.nlink().max(1));
+            }
+        }
+    }
+}
+
+/// What [`remove_old`] would free.
+fn old_size(dir: &Path, age: Duration, skip: &[PathBuf]) -> u64 {
+    old_size_before(dir, SystemTime::now() - age, skip)
+}
+
+fn old_size_before(dir: &Path, cutoff: SystemTime, skip: &[PathBuf]) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| !skip.contains(p))
+        .map(|p| match fs::symlink_metadata(&p) {
+            Ok(md) if md.is_dir() => old_size_before(&p, cutoff, skip),
+            Ok(md) if md.modified().is_ok_and(|m| m < cutoff) => {
+                md.blocks() * 512 / md.nlink().max(1)
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Sample items for `--demo`, sized like a busy developer Mac.
 pub fn demo() -> Vec<Item> {
     let item = |name: &str, detail: &str, gb: f64, hue: f32, icon: Source, pick: Pick| Item {
@@ -1548,6 +1796,7 @@ pub fn demo() -> Vec<Item> {
         pick,
         left: AtomicU64::new((gb * 1e9) as u64),
         how: How::Demo,
+        app: None,
     };
     vec![
         item(
@@ -1723,6 +1972,52 @@ mod tests {
         assert!(outside.join("keep").exists());
         assert!(Guard::new(Path::new("/")).is_none());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn old_files_go_and_kept_ones_stay() {
+        let home = std::env::temp_dir().join(format!("bd-old-{}", std::process::id()));
+        let logs = home.join("Library/Logs");
+        fs::create_dir_all(logs.join("app")).unwrap();
+        fs::create_dir_all(logs.join("codex")).unwrap();
+        fs::create_dir_all(logs.join("cache/com.apple.e5rt.e5bundlecache")).unwrap();
+        let month_ago = SystemTime::now() - Duration::from_secs(30 * 86_400);
+        for f in [
+            "app/old.log",
+            "codex/old.log",
+            "cache/com.apple.e5rt.e5bundlecache/m",
+        ] {
+            fs::write(logs.join(f), "x").unwrap();
+            fs::File::options()
+                .write(true)
+                .open(logs.join(f))
+                .unwrap()
+                .set_modified(month_ago)
+                .unwrap();
+        }
+        fs::write(logs.join("app/new.log"), "x").unwrap();
+
+        let guard = Guard::new(&home).unwrap();
+        let progress = Progress::default();
+        let clear = Clear {
+            guard: &guard,
+            progress: &progress,
+            freed: &|_| {},
+        };
+        let week = Duration::from_secs(7 * 86_400);
+        run(
+            &How::Old(vec![(logs.clone(), week)], vec![logs.join("codex")]),
+            &clear,
+        );
+        assert!(!logs.join("app/old.log").exists());
+        assert!(logs.join("app/new.log").exists());
+        assert!(logs.join("codex/old.log").exists());
+        // Compiled models are kept even inside something being cleared.
+        run(&How::Paths(vec![(logs.join("cache"), 0)]), &clear);
+        assert!(logs.join("cache/com.apple.e5rt.e5bundlecache/m").exists());
+        assert!(protected_cache("com.adobe.acc.AdobeDesktopService"));
+        assert!(!protected_cache("com.spotify.client"));
+        fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]
