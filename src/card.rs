@@ -18,6 +18,7 @@ use crate::disk::{self, Category, Progress, Report, Volume};
 use crate::sound::{Sound, Ticker};
 use crate::treemap::{self, Rect};
 
+mod confirm;
 mod onboarding;
 
 const BG: u32 = 0x161618;
@@ -134,6 +135,8 @@ pub struct Card {
     /// The developer caches row: its glow, and whether it is hovered.
     dev_glow: f32,
     dev_hover: bool,
+    /// Items waiting for the user to confirm clearing them.
+    confirm: Option<Vec<usize>>,
     /// When the items arrived, for their staggered sweep in.
     items_at: f32,
     clean_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -202,6 +205,7 @@ impl Card {
             hover_item: None,
             dev_glow: 0.0,
             dev_hover: false,
+            confirm: None,
             items_at: 0.0,
             clean_bounds: Rc::default(),
             particles: Vec::new(),
@@ -249,17 +253,10 @@ impl Card {
         }
     }
 
-    /// Clears the items `pick` says, from the treemap or the developer row.
-    fn clear(&mut self, pick: impl Fn(&Self, usize) -> bool) {
+    fn clear(&mut self, chosen: Vec<usize>) {
         let Some(items) = self.items.clone() else {
             return;
         };
-        let chosen: Vec<usize> = (0..items.len())
-            .filter(|&i| pick(self, i) && items[i].left() > 0)
-            .collect();
-        if chosen.is_empty() {
-            return;
-        }
         self.phase = Phase::Clearing;
         self.hover = None;
         self.hover_item = None;
@@ -268,7 +265,7 @@ impl Card {
     }
 
     fn clear_selected(&mut self) {
-        self.clear(|this, i| this.selected[i]);
+        self.ask_clear(|this, i| this.selected[i] && !this.is_dev(i));
     }
 
     fn is_dev(&self, i: usize) -> bool {
@@ -1113,7 +1110,7 @@ impl Card {
                                 .label("Clear")
                                 .disabled(!idle || !left)
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.clear(|this, i| this.is_dev(i));
+                                    this.ask_clear(|this, i| this.is_dev(i));
                                     cx.notify();
                                 })),
                         ),
@@ -1345,7 +1342,9 @@ impl Render for Card {
             )
             .children(rows);
 
+        let confirm = self.render_confirm(cx);
         v_flex()
+            .relative()
             .size_full()
             .bg(rgb(BG))
             .text_color(rgb(FG))
@@ -1359,6 +1358,7 @@ impl Render for Card {
             .child(legend)
             .child(div().flex_none().h(px(1.0)).bg(rgb(LINE)))
             .child(self.cleanup(cx))
+            .children(confirm)
             .into_any_element()
     }
 }

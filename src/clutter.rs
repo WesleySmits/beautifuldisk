@@ -75,6 +75,63 @@ impl Item {
     pub fn left(&self) -> u64 {
         self.left.load(Relaxed)
     }
+
+    /// Exactly what clearing this item touches, for the confirmation.
+    pub fn targets(&self) -> Vec<Target> {
+        let each = |list: &[(PathBuf, u64)], how: &'static str| {
+            list.iter()
+                .map(|(p, _)| Target {
+                    what: p.display().to_string(),
+                    how: how.into(),
+                })
+                .collect()
+        };
+        match &self.how {
+            How::Contents(dirs, skip) => dirs
+                .iter()
+                .filter(|d| d.is_dir())
+                .map(|d| {
+                    let kept = skip.iter().filter(|s| s.starts_with(d)).count();
+                    Target {
+                        what: d.display().to_string(),
+                        how: match kept {
+                            0 => "Everything inside".into(),
+                            1 => "Everything inside but 1 folder listed elsewhere".into(),
+                            n => format!("Everything inside but {n} folders listed elsewhere"),
+                        },
+                    }
+                })
+                .collect(),
+            How::Paths(list) => each(list, "Deleted"),
+            How::Worktrees(list) => each(list, "Removed with git worktree remove"),
+            How::Simulators(list) => each(list, "Deleted with simctl unless running"),
+            How::Emulators(list) => each(list, "Deleted with its .ini unless running"),
+            How::Docker(docker, args, _) => vec![Target {
+                what: format!("docker {}", args.join(" ")),
+                how: format!("Runs {}", docker.display()),
+            }],
+            How::System(command, dirs) => vec![Target {
+                what: format!("pkexec {}", command.join(" ")),
+                how: format!(
+                    "Empties {}, asks for your password",
+                    dirs.iter()
+                        .map(|d| d.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" and ")
+                ),
+            }],
+            How::Demo => vec![Target {
+                what: format!("~/demo/{}", self.name),
+                how: "Sample data, nothing is deleted".into(),
+            }],
+        }
+    }
+}
+
+/// One line of the confirmation: a path or command, and what happens to it.
+pub struct Target {
+    pub what: String,
+    pub how: String,
 }
 
 struct Spec {
