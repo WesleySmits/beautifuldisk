@@ -11,6 +11,9 @@ app="$out/Beautiful Disk.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp Info.plist "$app/Contents/"
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" \
+    -c "Set :CFBundleVersion $version" "$app/Contents/Info.plist"
 cp "$out/beautifuldisk" "$app/Contents/MacOS/"
 
 # App icon: every size macOS asks for, cut from the 1024px master.
@@ -23,10 +26,31 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$set_dir" -o "$app/Contents/Resources/AppIcon.icns"
 rm -rf "$set_dir"
+# Sparkle, which installs updates. Downloaded once and checked against the
+# hash of the pinned release.
+sparkle_version=2.10.1
+sparkle_sha256=1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27
+sparkle="$out/sparkle-$sparkle_version"
+if [ ! -d "$sparkle/Sparkle.framework" ]; then
+    mkdir -p "$sparkle"
+    curl -sSfL -o "$sparkle.tar.xz" \
+        "https://github.com/sparkle-project/Sparkle/releases/download/$sparkle_version/Sparkle-$sparkle_version.tar.xz"
+    echo "$sparkle_sha256  $sparkle.tar.xz" | shasum -a 256 -c - >/dev/null
+    tar xf "$sparkle.tar.xz" -C "$sparkle"
+    rm "$sparkle.tar.xz"
+fi
+mkdir -p "$app/Contents/Frameworks"
+ditto "$sparkle/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
+
+# Sign with the same certificate every time when it is in the keychain.
+# macOS ties Full Disk Access to the signature, so a throwaway one (-) makes
+# every update ask for access again.
+identity="Beautiful Disk Signing"
+security find-identity -p codesigning | grep -q "\"$identity\"" || identity=-
 # Seal the whole bundle. The linker signs only the binary, and a downloaded
 # app whose Info.plist and icon aren't covered by its signature opens as
 # "damaged" with no way past it.
-codesign --force --deep --sign - "$app"
+codesign --force --deep --sign "$identity" "$app"
 codesign --verify --deep --strict "$app"
 echo "$app"
 

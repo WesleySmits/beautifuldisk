@@ -22,6 +22,7 @@ mod apps;
 mod confirm;
 mod onboarding;
 mod scroll;
+mod update;
 
 const BG: u32 = 0x161618;
 const FG: u32 = 0xededef;
@@ -181,6 +182,9 @@ pub struct Card {
     onboarding: Option<onboarding::Onboarding>,
     /// The panel for removing apps, while it is open.
     apps: Option<apps::Apps>,
+    /// Linux: a newer release, once found.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    update: Option<update::Update>,
 }
 
 /// Legend geometry, shared by the layout and the gliding highlight.
@@ -250,7 +254,11 @@ impl Card {
             was_cleaning: 0,
             onboarding: None,
             apps: None,
+            update: None,
         };
+        if cfg!(not(target_os = "macos")) && !demo {
+            card.check_update(cx);
+        }
         // Autoplay waits a moment so a screen recording catches the scan.
         if !autoplay && !card.onboard(cx) {
             card.scan();
@@ -1509,6 +1517,7 @@ impl Render for Card {
             .child(
                 h_flex()
                     .gap_1()
+                    .children(self.update_button(cx))
                     .child(
                         Button::new("apps")
                             .ghost()

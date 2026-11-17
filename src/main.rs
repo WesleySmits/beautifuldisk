@@ -10,6 +10,7 @@ mod fsevents;
 mod grant;
 mod history;
 mod uninstall;
+mod update;
 /// Linux has no change journal that outlives the app, so every scan is full.
 #[cfg(not(target_os = "macos"))]
 mod fsevents {
@@ -36,9 +37,9 @@ use std::borrow::Cow;
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 
-actions!(beautifuldisk, [Quit]);
+actions!(beautifuldisk, [Quit, CheckForUpdates]);
 
-assets::icon_assets!(ExtraIcons, [RefreshCw, LayoutGrid]);
+assets::icon_assets!(ExtraIcons, [RefreshCw, LayoutGrid, ArrowDown]);
 
 /// The app's own two-layer icons from `assets/icons`, served as
 /// `icons/<name>.base.svg` and `icons/<name>.accent.svg`.
@@ -117,6 +118,18 @@ fn main() {
             KeyBinding::new("cmd-w", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
+        #[cfg(target_os = "macos")]
+        {
+            cx.on_action(|_: &CheckForUpdates, _| update::check());
+            cx.set_menus([Menu::new("Beautiful Disk").items([
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
+                MenuItem::action("Quit Beautiful Disk", Quit),
+            ])]);
+            if !demo {
+                update::start();
+            }
+        }
 
         // Room for the cleanup list, but never more than 70% of the screen.
         let screen = cx
