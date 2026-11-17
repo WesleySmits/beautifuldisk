@@ -1,6 +1,6 @@
 //! Removing apps with their files, from a panel over the card.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::f32::consts::FRAC_PI_2;
 use std::rc::Rc;
 
@@ -12,6 +12,7 @@ use gpui_kit::component::{Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use super::scroll::{Scroll, measure};
 use super::{BG, Card, FG, LINE, MUTED, Phase, duo, gb, icon, tilde, tone};
 use crate::disk::{self, Category};
 use crate::uninstall::{self, App};
@@ -30,16 +31,8 @@ pub(super) struct Apps {
     /// How far each app's files are shown, 0 to 1, and their full height.
     reveal: Vec<f32>,
     heights: Rc<RefCell<Vec<f32>>>,
-    /// The list scrolls itself so wheel steps glide: where it is, where it
-    /// is going, and the heights that bound it.
-    scroll: f32,
-    scroll_to: f32,
-    viewport: Rc<Cell<f32>>,
-    content: Rc<Cell<f32>>,
+    scroll: Scroll,
 }
-
-/// Wheel notches move this far.
-const NOTCH: f32 = 48.0;
 
 impl Apps {
     /// Eases the open and close and the scroll. Returns whether to keep going.
@@ -54,31 +47,9 @@ impl Apps {
                 moving = true;
             }
         }
-        // Closing an app can leave the list scrolled past its end.
-        let max = (self.content.get() - self.viewport.get()).max(0.0);
-        self.scroll_to = self.scroll_to.clamp(0.0, max);
-        self.scroll = approach(self.scroll, self.scroll_to, dt, 0.04);
-        if (self.scroll - self.scroll_to).abs() < 0.5 {
-            self.scroll = self.scroll_to;
-        } else {
-            moving = true;
-        }
+        moving |= self.scroll.tick(dt);
         // Heights are measured in a frame's layout, so look again next frame.
         moving || self.list.is_none()
-    }
-
-    fn wheel(&mut self, delta: ScrollDelta) {
-        match delta {
-            // Trackpads already scroll smoothly, with momentum.
-            ScrollDelta::Pixels(p) => {
-                self.scroll_to -= f32::from(p.y);
-                self.scroll = self.scroll_to;
-            }
-            ScrollDelta::Lines(l) => self.scroll_to -= l.y * NOTCH,
-        }
-        let max = (self.content.get() - self.viewport.get()).max(0.0);
-        self.scroll_to = self.scroll_to.clamp(0.0, max);
-        self.scroll = self.scroll.clamp(0.0, max);
     }
 }
 
@@ -178,33 +149,20 @@ impl Card {
                 .child("No apps you can remove.")
                 .into_any_element(),
             Some(list) => {
-                let (viewport, content) = (apps.viewport.clone(), apps.content.clone());
-                v_flex()
-                    .id("apps-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
+                let rows: Vec<_> = list
+                    .iter()
+                    .enumerate()
+                    .map(|(i, app)| self.app_row(i, app, apps, cx))
+                    .collect();
+                apps.scroll
+                    .area(
+                        "apps-list",
+                        cx,
+                        |this| this.apps.as_mut().map(|a| &mut a.scroll),
+                        rows,
+                    )
                     .border_t_1()
                     .border_color(rgb(LINE))
-                    .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
-                        if let Some(apps) = &mut this.apps {
-                            apps.wheel(e.delta);
-                        }
-                        cx.notify();
-                    }))
-                    .child(measure(move |h| viewport.set(h)))
-                    .child(
-                        v_flex()
-                            .flex_none()
-                            .relative()
-                            .top(px(-apps.scroll))
-                            .child(measure(move |h| content.set(h)))
-                            .children(
-                                list.iter()
-                                    .enumerate()
-                                    .map(|(i, app)| self.app_row(i, app, apps, cx)),
-                            ),
-                    )
                     .into_any_element()
             }
         };
@@ -376,14 +334,4 @@ impl Card {
         }
         row.into_any_element()
     }
-}
-
-/// An invisible layer that reports its parent's height after layout.
-fn measure(report: impl Fn(f32) + 'static) -> impl IntoElement {
-    canvas(
-        move |bounds, _, _| report(f32::from(bounds.size.height)),
-        |_, _, _, _| {},
-    )
-    .absolute()
-    .size_full()
 }

@@ -21,12 +21,21 @@ use crate::treemap::{self, Rect};
 mod apps;
 mod confirm;
 mod onboarding;
+mod scroll;
 
 const BG: u32 = 0x161618;
 const FG: u32 = 0xededef;
 const MUTED: u32 = 0x8b8b90;
 const LINE: u32 = 0x26262a;
 const OK: u32 = 0x4ccb76;
+
+/// Items under this share of the treemap join the "N more" tile.
+const SMALL: f64 = 0.03;
+/// Zoomed in, the map stretches until the "N more" tile is this share of
+/// its width and height.
+const ZOOM_SHARE: (f32, f32) = (0.4, 0.6);
+/// But never more than this, so the tiles around it stay in view.
+const ZOOM_MAX: f32 = 4.0;
 
 fn tone(category: Category) -> Tone {
     match category {
@@ -133,11 +142,20 @@ pub struct Card {
     /// Size of all items when found.
     items_total: f64,
     hover_item: Option<usize>,
+    /// Items too small for a readable tile, shown as one "N more" tile.
+    grouped: Vec<usize>,
+    group_glow: f32,
+    hover_group: bool,
+    /// Whether the map is zoomed into the "N more" tile, and how far it is
+    /// on screen, 0 to 1.
+    zoomed: bool,
+    zoom: f32,
     /// The developer caches row: its glow, and whether it is hovered.
     dev_glow: f32,
     dev_hover: bool,
     /// Items waiting for the user to confirm clearing them.
     confirm: Option<Vec<usize>>,
+    confirm_scroll: scroll::Scroll,
     /// When the items arrived, for their staggered sweep in.
     items_at: f32,
     clean_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -206,9 +224,15 @@ impl Card {
             item_size: Vec::new(),
             items_total: 0.0,
             hover_item: None,
+            grouped: Vec::new(),
+            group_glow: 0.0,
+            hover_group: false,
+            zoomed: false,
+            zoom: 0.0,
             dev_glow: 0.0,
             dev_hover: false,
             confirm: None,
+            confirm_scroll: Default::default(),
             items_at: 0.0,
             clean_bounds: Rc::default(),
             particles: Vec::new(),
@@ -247,6 +271,9 @@ impl Card {
         self.shown = [0.0; 9];
         self.hover = None;
         self.hover_item = None;
+        self.hover_group = false;
+        self.zoomed = false;
+        self.zoom = 0.0;
         self.items = None;
         self.item_shown.clear();
         self.freed = 0;
@@ -264,6 +291,7 @@ impl Card {
         self.phase = Phase::Clearing;
         self.hover = None;
         self.hover_item = None;
+        self.hover_group = false;
         self.dev_hover = false;
         clutter::clean(items, chosen, self.progress.clone(), self.demo);
     }
@@ -457,6 +485,14 @@ impl Card {
                     _ => i.left() as f64,
                 })
                 .collect();
+            let tiles: f64 = self.item_size.iter().sum();
+            self.grouped = (0..items.len())
+                .filter(|&i| self.item_size[i] > 0.0 && self.item_size[i] < tiles * SMALL)
+                .collect();
+            // One small item reads fine as its own tile.
+            if self.grouped.len() < 2 {
+                self.grouped.clear();
+            }
             self.items_at = self.time;
             self.items = Some(items);
         }
@@ -475,6 +511,30 @@ impl Card {
                 moving = true;
             } else {
                 self.dev_glow = glow_to;
+            }
+        }
+        if !self.grouped.is_empty() {
+            let on = self.grouped.iter().any(|&i| self.selected[i]);
+            let glow_to = if self
+                .grouped
+                .iter()
+                .any(|&i| busy(self.progress.cleaning(), i))
+            {
+                1.0
+            } else if self.hover_group {
+                if on { 1.0 } else { 0.6 }
+            } else if !on {
+                0.06
+            } else if self.hover_item.is_some() {
+                0.3
+            } else {
+                0.62
+            };
+            self.group_glow = approach(self.group_glow, glow_to, dt, 0.06);
+            if (self.group_glow - glow_to).abs() > 0.005 {
+                moving = true;
+            } else {
+                self.group_glow = glow_to;
             }
         }
         if self.autoplay && self.play_script() {
@@ -503,6 +563,7 @@ impl Card {
                     _ if !self.selected[i] => 0.06,
                     (Some(h), _) if h == i => 1.0,
                     (Some(_), _) => 0.3,
+                    _ if self.hover_group => 0.3,
                     _ => 0.62,
                 };
                 self.item_glow[i] = approach(self.item_glow[i], glow_to, dt, 0.06);
@@ -546,10 +607,17 @@ impl Card {
         if cleaning != 0
             && let Some(items) = &self.items
         {
-            for (i, t) in self.tiles().into_iter().enumerate() {
+            let (tiles, group) = self.tiles();
+            for (i, t) in tiles.into_iter().enumerate() {
                 if busy(cleaning, i) && t.w > 2.0 && t.h > 2.0 {
                     emit.push(([t.x, t.y, t.x + t.w, t.y + t.h], items[i].tone));
                 }
+            }
+            if let Some(t) = group
+                && self.zoom == 0.0
+                && self.grouped.iter().any(|&i| busy(cleaning, i))
+            {
+                emit.push(([t.x, t.y, t.x + t.w, t.y + t.h], Tone::Grey));
             }
         }
         // Spread the dust so many tiles at once don't flood the screen.
@@ -560,6 +628,19 @@ impl Card {
             && apps.tick(dt)
         {
             moving = true;
+        }
+        if self.confirm.is_some() && self.confirm_scroll.tick(dt) {
+            moving = true;
+        }
+        if self.zoomed && self.group_members().is_empty() {
+            self.zoomed = false;
+        }
+        let zoom_to = if self.zoomed { 1.0 } else { 0.0 };
+        self.zoom = approach(self.zoom, zoom_to, dt, 0.08);
+        if (self.zoom - zoom_to).abs() > 0.001 {
+            moving = true;
+        } else {
+            self.zoom = zoom_to;
         }
 
         working || moving || !self.particles.is_empty()
@@ -611,8 +692,11 @@ impl Card {
             .collect()
     }
 
-    /// Tile rectangles in the treemap's own coordinates.
-    fn tiles(&self) -> Vec<Rect> {
+    /// Tile rectangles in the treemap's own coordinates, and the "N more"
+    /// tile that stands in for the grouped items. Zooming in grows that tile
+    /// and lays its items out inside it, while the map widens past its left
+    /// edge so the big tiles slide partly out of view.
+    fn tiles(&self) -> (Vec<Rect>, Option<Rect>) {
         let size = self.clean_bounds.get().size;
         let area = Rect {
             x: 0.0,
@@ -620,7 +704,68 @@ impl Card {
             w: f32::from(size.width),
             h: f32::from(size.height),
         };
-        treemap::layout(&self.item_size, &self.weights(), area)
+        let mut initial = self.item_size.clone();
+        let mut weight = self.weights();
+        if self.grouped.is_empty() {
+            return (treemap::layout(&initial, &weight, area), None);
+        }
+        let member_initial: Vec<f64> = self.grouped.iter().map(|&i| initial[i]).collect();
+        let member_weight: Vec<f64> = self.grouped.iter().map(|&i| weight[i]).collect();
+        for &i in &self.grouped {
+            initial[i] = 0.0;
+            weight[i] = 0.0;
+        }
+        // Last, as the smallest: items are sorted largest first.
+        initial.push(member_initial.iter().sum());
+        weight.push(member_weight.iter().sum());
+        let mut tiles = treemap::layout(&initial, &weight, area);
+        let Some(mut group) = tiles.pop() else {
+            return (tiles, None);
+        };
+        if self.zoom > 0.0 {
+            // A camera over the unchanged layout: stretching the map keeps
+            // every tile in place relative to the others, so the zoom glides.
+            let z = self.zoom;
+            let axis = |at: f32, len: f32, full: f32, share: f32| {
+                let scale = 1.0 + ((share * full / len.max(1.0)).clamp(1.0, ZOOM_MAX) - 1.0) * z;
+                // Centre the group, without showing past either end.
+                let offset =
+                    (full / 2.0 - (at + len / 2.0) * scale).clamp(full - full * scale, 0.0);
+                move |v: f32| v * scale + offset
+            };
+            let x = axis(group.x, group.w, area.w, ZOOM_SHARE.0);
+            let y = axis(group.y, group.h, area.h, ZOOM_SHARE.1);
+            let view = |r: Rect| {
+                let (x0, y0) = (x(r.x), y(r.y));
+                Rect {
+                    x: x0,
+                    y: y0,
+                    w: x(r.x + r.w) - x0,
+                    h: y(r.y + r.h) - y0,
+                }
+            };
+            group = view(group);
+            for tile in &mut tiles {
+                *tile = view(*tile);
+            }
+        }
+        if self.zoom > 0.0 {
+            let inner = treemap::layout(&member_initial, &member_weight, group);
+            for (&i, rect) in self.grouped.iter().zip(inner) {
+                tiles[i] = rect;
+            }
+        }
+        (tiles, Some(group))
+    }
+
+    /// Grouped items not yet cleared away.
+    fn group_members(&self) -> Vec<usize> {
+        let visible = self.visible();
+        self.grouped
+            .iter()
+            .copied()
+            .filter(|i| visible.contains(i))
+            .collect()
     }
 
     /// Start and end of a category's segment as fractions of the bar.
@@ -836,6 +981,33 @@ impl Card {
         if let Some(i) = self.hover_item {
             return item_line(i, items[i].detail.clone());
         }
+        if self.hover_group {
+            let members = self.group_members();
+            let names: Vec<&str> = members.iter().map(|&i| items[i].name.as_str()).collect();
+            return h_flex()
+                .gap_2()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(FG))
+                        .child(format!("{} more", members.len())),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(muted)
+                        .child(gb(members.iter().map(|&i| self.item_shown[i]).sum())),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(muted)
+                        .child(names.join(", ")),
+                )
+                .into_any_element();
+        }
         let free = self.volume.total as f64 - self.used_shown();
         div()
             .text_color(muted)
@@ -850,7 +1022,7 @@ impl Card {
     /// tile on top for hover, clicks and the label.
     fn treemap(&self, items: &[Item], cx: &mut Context<Self>) -> impl IntoElement + use<> {
         const DUST: f32 = 60.0;
-        let tiles = self.tiles();
+        let (tiles, group) = self.tiles();
         let cleaning = self.progress.cleaning();
         let weights = self.weights();
         let inset = |r: Rect| Rect {
@@ -859,7 +1031,7 @@ impl Card {
             w: (r.w - treemap::GAP).max(0.0),
             h: (r.h - treemap::GAP).max(0.0),
         };
-        let painted: Vec<(Rect, treemap::Tile)> = items
+        let mut painted: Vec<(Rect, treemap::Tile)> = items
             .iter()
             .enumerate()
             .filter(|&(i, _)| tiles[i].w >= treemap::GAP + 2.0 && tiles[i].h >= treemap::GAP + 2.0)
@@ -875,6 +1047,26 @@ impl Card {
                 (inset(tiles[i]), tile)
             })
             .collect();
+        let members = self.group_members();
+        // Zoomed in, the grouped items are tiles of their own instead.
+        let group = group
+            .map(inset)
+            .filter(|r| self.zoom == 0.0 && !members.is_empty() && r.w >= 2.0 && r.h >= 2.0);
+        if let Some(r) = group {
+            let shown: f64 = members.iter().map(|&i| self.item_shown[i]).sum();
+            let weight: f64 = members.iter().map(|&i| weights[i]).sum();
+            painted.push((
+                r,
+                treemap::Tile {
+                    tone: Tone::Grey,
+                    on: members.iter().any(|&i| self.selected[i]),
+                    glow: self.group_glow,
+                    reveal: (shown / weight.max(1.0)) as f32,
+                    busy: members.iter().any(|&i| busy(cleaning, i)),
+                    clear: 0.0,
+                },
+            ));
+        }
 
         let idle = self.phase == Phase::Idle;
         let mut labels = Vec::new();
@@ -948,12 +1140,70 @@ impl Card {
                         cx.notify();
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.phase == Phase::Idle {
+                        if this.phase != Phase::Idle {
+                            return;
+                        }
+                        // Zoomed in, the tiles around the group zoom back out.
+                        if this.zoomed && !this.grouped.contains(&i) {
+                            this.zoomed = false;
+                        } else {
                             this.selected[i] = !this.selected[i];
+                        }
+                        cx.notify();
+                    }))
+                    .child(label),
+            );
+        }
+
+        if let Some(r) = group {
+            let on = members.iter().any(|&i| self.selected[i]);
+            let shown: f64 = members.iter().map(|&i| self.item_shown[i]).sum();
+            let roomy = r.w >= 44.0 && r.h >= 44.0;
+            labels.push(
+                div()
+                    .id("tile-more")
+                    .absolute()
+                    .left(px(r.x))
+                    .top(px(r.y))
+                    .w(px(r.w))
+                    .h(px(r.h))
+                    .p(px(6.0))
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .justify_between()
+                    .text_color(rgb(if on { FG } else { 0x77777c }))
+                    .when(idle, |tile| tile.cursor_pointer())
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        if this.phase != Phase::Idle || this.autoplay {
+                            return;
+                        }
+                        this.hover_group = *hovered;
+                        cx.notify();
+                    }))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.phase == Phase::Idle {
+                            this.hover_group = false;
+                            this.zoomed = true;
                             cx.notify();
                         }
                     }))
-                    .child(label),
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .text_size(px(11.5))
+                            .child(format!("{} more", members.len())),
+                    )
+                    .when(roomy, |tile| {
+                        tile.child(
+                            div()
+                                .whitespace_nowrap()
+                                .font_family("Menlo")
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(10.5))
+                                .child(gb(shown)),
+                        )
+                    }),
             );
         }
 
@@ -966,22 +1216,29 @@ impl Card {
             .min_h(px(160.0))
             .w_full()
             .child(
-                canvas(
-                    move |bounds, _, _| clean_bounds.set(bounds),
-                    move |bounds, _, window, _| {
-                        for (r, tile) in &painted {
-                            let at = Bounds::new(
-                                bounds.origin + point(px(r.x), px(r.y)),
-                                size(px(r.w), px(r.h)),
-                            );
-                            treemap::paint(tile, at, bounds.origin, time, window);
-                        }
-                    },
-                )
-                .absolute()
-                .size_full(),
+                // Clips the tiles that zooming slides past the edge.
+                div()
+                    .absolute()
+                    .size_full()
+                    .overflow_hidden()
+                    .child(
+                        canvas(
+                            move |bounds, _, _| clean_bounds.set(bounds),
+                            move |bounds, _, window, _| {
+                                for (r, tile) in &painted {
+                                    let at = Bounds::new(
+                                        bounds.origin + point(px(r.x), px(r.y)),
+                                        size(px(r.w), px(r.h)),
+                                    );
+                                    treemap::paint(tile, at, bounds.origin, time, window);
+                                }
+                            },
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+                    .children(labels),
             )
-            .children(labels)
             .child(
                 canvas(
                     |_, _, _| {},

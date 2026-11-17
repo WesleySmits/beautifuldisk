@@ -5,6 +5,7 @@ use gpui_kit::component::{Sizable, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use super::scroll::Scroll;
 use super::{BG, Card, FG, LINE, MUTED, Phase, gb, tilde};
 
 impl Card {
@@ -27,6 +28,7 @@ impl Card {
             self.hover_item = None;
             self.dev_hover = false;
             self.confirm = Some(chosen);
+            self.confirm_scroll = Scroll::default();
         }
     }
 
@@ -36,39 +38,43 @@ impl Card {
         let muted = rgb(MUTED);
         let total: f64 = chosen.iter().map(|&i| self.item_shown[i]).sum();
 
-        let groups = chosen.iter().map(|&i| {
-            let item = &items[i];
-            let targets = item.targets().into_iter().map(|t| {
-                v_flex()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .font_family("Menlo")
-                            .text_size(px(11.5))
-                            .text_color(rgb(FG))
-                            .child(tilde(&t.what)),
-                    )
-                    .child(div().text_size(px(11.5)).text_color(muted).child(t.how))
-            });
-            v_flex()
-                .gap_2()
-                .py_3()
-                .border_b_1()
-                .border_color(rgb(LINE))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .children(item.icon.clone().map(|icon| img(icon).size(px(16.0))))
+        let groups: Vec<AnyElement> = chosen
+            .iter()
+            .map(|&i| {
+                let item = &items[i];
+                let targets = item.targets().into_iter().map(|t| {
+                    v_flex()
+                        .gap_0p5()
                         .child(
                             div()
-                                .flex_1()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(item.name.clone()),
+                                .font_family("Menlo")
+                                .text_size(px(11.5))
+                                .text_color(rgb(FG))
+                                .child(tilde(&t.what)),
                         )
-                        .child(div().text_color(muted).child(gb(self.item_shown[i]))),
-                )
-                .child(v_flex().gap_2().pl(px(24.0)).children(targets))
-        });
+                        .child(div().text_size(px(11.5)).text_color(muted).child(t.how))
+                });
+                v_flex()
+                    .gap_2()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(LINE))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .children(item.icon.clone().map(|icon| img(icon).size(px(16.0))))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(item.name.clone()),
+                            )
+                            .child(div().text_color(muted).child(gb(self.item_shown[i]))),
+                    )
+                    .child(v_flex().gap_2().pl(px(24.0)).children(targets))
+                    .into_any_element()
+            })
+            .collect();
 
         let panel = v_flex()
             .w_full()
@@ -96,14 +102,15 @@ impl Card {
                     ),
             )
             .child(
-                div()
-                    .id("confirm-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
+                self.confirm_scroll
+                    .area(
+                        "confirm-list",
+                        cx,
+                        |this| Some(&mut this.confirm_scroll),
+                        groups,
+                    )
                     .border_t_1()
-                    .border_color(rgb(LINE))
-                    .children(groups),
+                    .border_color(rgb(LINE)),
             )
             .child(
                 h_flex()
