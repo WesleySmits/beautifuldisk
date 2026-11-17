@@ -86,6 +86,8 @@ pub struct Progress {
     items: Mutex<Option<Arc<Vec<Item>>>>,
     /// Bit `i` is set while item `i` is being cleared.
     cleaning: AtomicU64,
+    /// What the last clean left behind, and why.
+    kept: Mutex<Vec<String>>,
 }
 
 /// What a finished scan learned beyond category totals, used to explain them.
@@ -150,6 +152,15 @@ impl Progress {
 
     pub(crate) fn start_cleaning(&self) {
         self.done.store(false, Relaxed);
+        self.kept.lock().unwrap().clear();
+    }
+
+    pub(crate) fn keep(&self, why: String) {
+        self.kept.lock().unwrap().push(why);
+    }
+
+    pub fn kept(&self) -> Vec<String> {
+        self.kept.lock().unwrap().clone()
     }
 
     pub(crate) fn finish_cleaning(&self) {

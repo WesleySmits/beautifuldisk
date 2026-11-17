@@ -5,8 +5,8 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use dither_gpui::dither_core::Tone;
@@ -1579,17 +1579,30 @@ pub fn clean(items: Arc<Vec<Item>>, chosen: Vec<usize>, progress: Arc<Progress>,
                     };
                     let before = item.left();
                     let open = item.app.filter(|_| !demo).filter(|a| a.open());
+                    let kept = Mutex::new(Vec::new());
                     if demo {
                         demo_clean(item, &freed);
-                    } else if open.is_some() {
+                    } else if let Some(app) = open {
                         // Left for next time, after the app quits.
+                        kept.lock().unwrap().push(format!("{} is open", app.name));
                     } else if let Some(guard) = Guard::new(&disk::home()) {
                         let clear = Clear {
                             guard: &guard,
                             progress,
                             freed: &freed,
+                            kept: &kept,
                         };
                         tree::pool().install(|| run(&item.how, &clear));
+                    }
+                    let mut kept = kept.into_inner().unwrap();
+                    // Most of it still there, with no reason known: files we
+                    // weren't allowed to delete.
+                    let left = item.left();
+                    if kept.is_empty() && !demo && left > 100_000_000 && left * 2 > before {
+                        kept.push("some files couldn't be deleted".into());
+                    }
+                    if !kept.is_empty() {
+                        progress.keep(format!("{} ({})", item.name, kept.join(", ")));
                     }
                     if !demo {
                         history::record(item, before - item.left(), open.map(|a| a.name));
@@ -1650,6 +1663,8 @@ struct Clear<'a> {
     guard: &'a Guard,
     progress: &'a Progress,
     freed: &'a (dyn Fn(u64) + Sync),
+    /// Why parts were left, for the note after clearing.
+    kept: &'a Mutex<Vec<String>>,
 }
 
 impl Clear<'_> {
@@ -1659,6 +1674,25 @@ impl Clear<'_> {
             remove_all(path, dev, self);
         }
     }
+}
+
+/// Whether an emulator has `avd` open. A running emulator writes its pid
+/// into hardware-qemu.ini.lock, but a crash leaves the file behind, so the
+/// pid must still be an emulator.
+fn emulator_running(avd: &Path) -> bool {
+    let Ok(lock) = fs::read_to_string(avd.join("hardware-qemu.ini.lock")) else {
+        return false;
+    };
+    let Ok(pid) = lock.trim_end_matches('\0').trim().parse::<u32>() else {
+        return false;
+    };
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .is_ok_and(|o| {
+            let name = String::from_utf8_lossy(&o.stdout);
+            name.contains("qemu") || name.contains("emulator")
+        })
 }
 
 fn run(how: &How, clear: &Clear) {
@@ -1729,11 +1763,13 @@ fn run(how: &How, clear: &Clear) {
                 .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
                 .unwrap_or_default();
+            let mut running = 0;
             for (path, bytes) in devices {
                 let Some(udid) = path.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
                 if booted.contains(udid) {
+                    running += 1;
                     continue;
                 }
                 progress.show(path);
@@ -1745,15 +1781,24 @@ fn run(how: &How, clear: &Clear) {
                     freed(*bytes);
                 }
             }
+            if running > 0 {
+                let what = if running == 1 {
+                    "1 is running".into()
+                } else {
+                    format!("{running} are running")
+                };
+                clear.kept.lock().unwrap().push(what);
+            }
         }
         How::Emulators(avds) => {
             for (avd, _) in avds {
-                // The emulator holds .lock files inside a running device.
-                let running = fs::read_dir(avd).is_ok_and(|mut entries| {
-                    entries
-                        .any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "lock")))
-                });
-                if running {
+                if emulator_running(avd) {
+                    let name = avd.file_stem().unwrap_or_default().to_string_lossy();
+                    clear
+                        .kept
+                        .lock()
+                        .unwrap()
+                        .push(format!("{name} is running"));
                     continue;
                 }
                 clear.remove(avd);
@@ -2191,6 +2236,19 @@ mod tests {
     use std::time::Instant;
 
     #[test]
+    fn stale_emulator_locks_are_not_running() {
+        let avd = std::env::temp_dir().join(format!("bd-avd-{}/phone.avd", std::process::id()));
+        fs::create_dir_all(&avd).unwrap();
+        assert!(!emulator_running(&avd));
+        // Left by a crash: the pid is ours now, and we aren't an emulator.
+        let lock = avd.join("hardware-qemu.ini.lock");
+        fs::write(&lock, format!("{}\0", std::process::id())).unwrap();
+        fs::write(avd.join("multiinstance.lock"), "").unwrap();
+        assert!(!emulator_running(&avd));
+        fs::remove_dir_all(avd.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn clearing_stays_inside_home() {
         let root = std::env::temp_dir().join(format!("bd-guard-{}", std::process::id()));
         let (home, outside) = (root.join("home"), root.join("outside"));
@@ -2210,6 +2268,7 @@ mod tests {
             guard: &guard,
             progress: &progress,
             freed: &|_| {},
+            kept: &Mutex::default(),
         };
         run(
             &How::Contents(vec![cache.clone(), home.join("linked")], Vec::new()),
@@ -2323,6 +2382,7 @@ mod tests {
             guard: &guard,
             progress: &progress,
             freed: &|_| {},
+            kept: &Mutex::default(),
         };
         let week = Duration::from_secs(7 * 86_400);
         run(

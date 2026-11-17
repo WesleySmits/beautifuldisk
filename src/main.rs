@@ -39,7 +39,7 @@ use std::borrow::Cow;
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 
-actions!(beautifuldisk, [Quit, CheckForUpdates]);
+actions!(beautifuldisk, [Quit, CheckForUpdates, Dismiss]);
 
 assets::icon_assets!(
     ExtraIcons,
@@ -135,6 +135,7 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-w", Quit, None),
+            KeyBinding::new("escape", Dismiss, Some("Card")),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         #[cfg(target_os = "macos")]

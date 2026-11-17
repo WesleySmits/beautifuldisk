@@ -29,6 +29,8 @@ mod update;
 const BG: u32 = 0x161618;
 const FG: u32 = 0xededef;
 const MUTED: u32 = 0x8b8b90;
+/// Caution: what wasn't cleared, Docker's log warning, data that can't come back.
+const WARN: u32 = 0xe8a84a;
 const LINE: u32 = 0x26262a;
 const OK: u32 = 0x4ccb76;
 
@@ -213,12 +215,16 @@ pub struct Card {
     ticker: Ticker,
     /// The item being cleared last frame, to whoosh when it is done.
     was_cleaning: u64,
+    /// What the last clear couldn't remove, and why.
+    kept: Vec<String>,
     /// First launch on macOS: which guarded folders to scan, before the scan.
     onboarding: Option<onboarding::Onboarding>,
     /// The panel for removing apps, while it is open.
     apps: Option<apps::Apps>,
     /// The Docker panel, while it is open.
     docker: Option<docker_panel::DockerPanel>,
+    /// Holds keyboard focus so Escape reaches the card.
+    focus: FocusHandle,
     /// The docker CLI, when installed.
     docker_bin: Option<std::path::PathBuf>,
     /// Linux: a newer release, once found.
@@ -291,6 +297,7 @@ impl Card {
             sound: Sound::new(),
             ticker: Ticker::default(),
             was_cleaning: 0,
+            kept: Vec::new(),
             onboarding: None,
             apps: None,
             docker: None,
@@ -300,6 +307,7 @@ impl Card {
                 crate::docker::find()
             },
             update: None,
+            focus: cx.focus_handle(),
         };
         if cfg!(not(target_os = "macos")) && !demo {
             card.check_update(cx);
@@ -368,6 +376,7 @@ impl Card {
             return;
         };
         self.phase = Phase::Clearing;
+        self.kept.clear();
         self.hover = None;
         self.hover_item = None;
         self.hover_group = false;
@@ -473,6 +482,7 @@ impl Card {
                             }
                         }
                     }
+                    self.kept = self.progress.kept();
                     self.phase = Phase::Idle;
                 }
                 Phase::Idle => {}
@@ -1087,6 +1097,25 @@ impl Card {
                         .truncate()
                         .text_color(muted)
                         .child(names.join(", ")),
+                )
+                .into_any_element();
+        }
+        if !self.kept.is_empty() {
+            return h_flex()
+                .gap_1p5()
+                .min_w_0()
+                .child(
+                    Icon::new(IconName::TriangleAlert)
+                        .size_3p5()
+                        .flex_none()
+                        .text_color(rgb(WARN)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(WARN))
+                        .child(format!("Not cleared: {}", self.kept.join("; "))),
                 )
                 .into_any_element();
         }
@@ -1706,7 +1735,22 @@ impl Render for Card {
         let confirm = self.render_confirm(cx);
         let apps = self.render_apps(cx);
         let docker = self.render_docker(cx);
+        if window.focused(cx).is_none() {
+            self.focus.focus(window, cx);
+        }
         v_flex()
+            .track_focus(&self.focus)
+            .key_context("Card")
+            .on_action(cx.listener(|this, _: &crate::Dismiss, _, cx| {
+                if this.apps.is_some() {
+                    this.dismiss_apps(cx);
+                } else if this.docker.is_some() {
+                    this.dismiss_docker(cx);
+                } else {
+                    this.confirm = None;
+                }
+                cx.notify();
+            }))
             .relative()
             .size_full()
             .bg(rgb(BG))

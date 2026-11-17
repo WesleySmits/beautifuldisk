@@ -83,6 +83,13 @@ impl Card {
         .detach();
     }
 
+    /// Escape: closes the panel, unless an app is being removed.
+    pub(super) fn dismiss_apps(&mut self, cx: &mut Context<Self>) {
+        if self.apps.as_ref().is_some_and(|apps| !apps.removing) {
+            self.close_apps(cx);
+        }
+    }
+
     fn close_apps(&mut self, cx: &mut Context<Self>) {
         if let Some(apps) = self.apps.take()
             && apps.changed

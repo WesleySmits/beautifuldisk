@@ -15,12 +15,9 @@ use gpui_kit::*;
 
 use super::scroll::Scroll;
 use super::tip::Tip;
-use super::{BG, Card, FG, LINE, MUTED, Phase};
+use super::{BG, Card, FG, LINE, MUTED, Phase, WARN};
 use crate::docker::{self, Chosen, Docker, State};
 use crate::icons::{self, Logo, Source};
-
-/// Caution: the log warning and the data that can't come back.
-const WARN: u32 = 0xe8a84a;
 
 pub(super) struct DockerPanel {
     bin: PathBuf,
@@ -142,6 +139,22 @@ impl Card {
             scroll: Scroll::default(),
         });
         self.reread_docker(cx);
+    }
+
+    /// Escape: backs out of the restart question, else closes the panel.
+    /// Waits while Docker is busy, like the close button.
+    pub(super) fn dismiss_docker(&mut self, cx: &mut Context<Self>) {
+        let Some(panel) = &mut self.docker else {
+            return;
+        };
+        if panel.busy.is_some() {
+            return;
+        }
+        if panel.asking {
+            panel.asking = false;
+        } else {
+            self.close_docker(cx);
+        }
     }
 
     fn close_docker(&mut self, cx: &mut Context<Self>) {
