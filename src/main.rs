@@ -10,6 +10,7 @@ mod fsevents;
 #[cfg(target_os = "macos")]
 mod grant;
 mod history;
+mod pixel_text;
 mod uninstall;
 mod update;
 /// Linux has no change journal that outlives the app, so every scan is full.

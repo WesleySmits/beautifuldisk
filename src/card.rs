@@ -947,18 +947,15 @@ impl Card {
         let muted = rgb(MUTED);
         let path = |label: &'static str| {
             h_flex()
-                .gap_2()
+                .h_full()
                 .min_w_0()
-                .child(div().flex_none().text_color(rgb(FG)).child(label))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .font_family("Menlo")
-                        .text_size(px(11.5))
-                        .text_color(muted)
-                        .child(tilde(&self.progress.current())),
-                )
+                .items_center()
+                .child(crate::pixel_text::status(
+                    label,
+                    tilde(&self.progress.current()),
+                    self.time,
+                    MUTED,
+                ))
                 .into_any_element()
         };
         match self.phase {
