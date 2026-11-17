@@ -4,6 +4,7 @@ version = "0.2.2"
 edition = "2024"
 
 [dependencies]
+blake3 = "1.8.7"
 dither-gpui = "0.1.0"
 gpui-kit = "=0.7.3"
 libc = "0.2.191"
@@ -17,7 +18,7 @@ dispatch2 = "0.3.1"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext", "objc2-core-graphics", "NSApplication", "NSResponder", "NSEvent", "NSView", "NSWindow", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSPasteboard", "NSRunningApplication", "NSScreen", "NSGraphics"] }
 objc2-core-foundation = { version = "0.3.2", features = ["CFArray", "CFString"] }
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGImage", "CGWindow"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage", "CGWindow"] }
 objc2-core-services = { version = "0.3.2", default-features = false, features = ["std", "libc", "FSEvents", "dispatch2"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSData", "NSBundle", "NSFileManager", "NSError", "NSDictionary", "NSGeometry", "NSURL", "NSArray", "NSValue", "NSEnumerator"] }
 raw-window-handle = "0.6.2"

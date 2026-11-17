@@ -24,6 +24,7 @@
   - Build caches: `.next`, `.turbo`, Bazel, ccache, sccache, JetBrains, VS Code, Python `.venv` folders
   - Test browsers (Playwright, Cypress, Puppeteer), browser caches, downloaded models (Hugging Face, Ollama, LM Studio, PyTorch), old installers and the Trash
 - Clears everything you picked at the same time, with quiet ticks and a whoosh when it is gone.
+- Finds files you have more than one copy of, and screenshots older than three months, in Pictures, Documents, Movies, Desktop and Downloads. Open one to see its copies side by side and pick which to keep. They go to the Trash, with Put back.
 
 ## Install
 

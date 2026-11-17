@@ -5,11 +5,13 @@ mod card;
 mod clutter;
 mod disk;
 mod docker;
+mod files;
 #[cfg(target_os = "macos")]
 mod fsevents;
 #[cfg(target_os = "macos")]
 mod grant;
 mod history;
+mod mosaic;
 mod pixel_text;
 mod uninstall;
 mod update;

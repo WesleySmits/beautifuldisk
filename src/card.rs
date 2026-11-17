@@ -25,6 +25,7 @@ mod onboarding;
 mod scroll;
 mod tip;
 mod update;
+mod your_files;
 
 const BG: u32 = 0x161618;
 const FG: u32 = 0xededef;
@@ -146,6 +147,12 @@ fn tilde(path: &str) -> String {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+enum View {
+    Caches,
+    Files,
+}
+
+#[derive(Clone, Copy, PartialEq)]
 enum Phase {
     Scanning,
     Idle,
@@ -227,6 +234,9 @@ pub struct Card {
     focus: FocusHandle,
     /// The docker CLI, when installed.
     docker_bin: Option<std::path::PathBuf>,
+    /// Which list fills the bottom: the caches, or the user's own files.
+    view: View,
+    files: your_files::FilesView,
     /// Linux: a newer release, once found.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     update: Option<update::Update>,
@@ -307,6 +317,8 @@ impl Card {
                 crate::docker::find()
             },
             update: None,
+            view: View::Caches,
+            files: Default::default(),
             focus: cx.focus_handle(),
         };
         if cfg!(not(target_os = "macos")) && !demo {
@@ -337,6 +349,7 @@ impl Card {
         self.zoom = 0.0;
         self.items = None;
         self.item_shown.clear();
+        self.files = Default::default();
         self.freed = 0;
         if self.demo {
             disk::demo::scan(self.progress.clone());
@@ -585,6 +598,7 @@ impl Card {
             }
             self.items_at = self.time;
             self.items = Some(items);
+            self.start_files();
         }
         if self.items.is_some() {
             let busy_dev = self
@@ -736,6 +750,10 @@ impl Card {
             moving = true;
         } else {
             self.zoom = zoom_to;
+        }
+
+        if self.files_tick(dt) {
+            moving = true;
         }
 
         working || moving || !self.particles.is_empty()
@@ -1507,6 +1525,38 @@ impl Card {
         )
     }
 
+    /// The two headlines over the bottom list, each a tab: what caches can
+    /// go, and what is in the user's own files.
+    fn tabs(&self, cx: &mut Context<Self>) -> Div {
+        let tab = |id: &'static str, view: View, figure: Div| {
+            let active = self.view == view;
+            div()
+                .id(id)
+                .flex_none()
+                .opacity(if active { 1.0 } else { 0.4 })
+                .when(!active, |tab| tab.cursor_pointer())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.view = view;
+                    this.hover_item = None;
+                    this.hover_group = false;
+                    cx.notify();
+                }))
+                .child(figure)
+        };
+        h_flex()
+            .gap_6()
+            .child(tab(
+                "tab-caches",
+                View::Caches,
+                figure(gb(self.selected_bytes()), 20.0, "can go", 13.0),
+            ))
+            .child(tab(
+                "tab-files",
+                View::Files,
+                figure(self.files_figure(), 20.0, "in your files", 13.0),
+            ))
+    }
+
     fn cleanup(&self, cx: &mut Context<Self>) -> AnyElement {
         let row = h_flex().h(px(30.0)).gap_2().items_center();
         let Some(items) = self.items.clone() else {
@@ -1519,10 +1569,35 @@ impl Card {
                 )
                 .into_any_element();
         };
-        if self.visible().is_empty() {
-            return v_flex()
+        let idle = self.phase == Phase::Idle;
+        let tabs = self.tabs(cx);
+        let heading = move |status: AnyElement, buttons: Option<AnyElement>| {
+            h_flex()
+                .items_start()
+                .justify_between()
+                .gap_4()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(tabs)
+                        .child(div().h(px(18.0)).child(status)),
+                )
+                .children(buttons)
+        };
+
+        let body = if self.view == View::Files {
+            v_flex()
+                .flex_1()
+                .min_h_0()
                 .gap_3()
-                .children(self.dev_row(&items, cx))
+                .child(heading(self.files_status(), Some(self.files_buttons(cx))))
+                .child(self.files_area(cx))
+        } else if self.visible().is_empty() {
+            v_flex()
+                .gap_3()
+                .child(heading(div().into_any_element(), None))
                 .child(
                     row.child(Icon::new(IconName::Check).size_3p5().text_color(rgb(OK)))
                         .child(
@@ -1531,43 +1606,33 @@ impl Card {
                                 .child("Nothing else is worth clearing right now."),
                         ),
                 )
-                .into_any_element();
-        }
-
-        let selected = self.selected_bytes();
-        let idle = self.phase == Phase::Idle;
-        let header = h_flex()
-            .items_start()
-            .justify_between()
-            .gap_4()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1()
-                    .child(figure(gb(selected), 20.0, "can go", 13.0))
-                    .child(div().h(px(18.0)).child(self.clean_status(&items))),
-            )
-            .child(
-                Button::new("clear")
-                    .primary()
-                    .small()
-                    .label("Clear")
-                    .disabled(!idle || selected < 1e6)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.clear_selected(cx);
-                        cx.notify();
-                    })),
-            );
-
-        let map = self.treemap(&items, cx);
+        } else {
+            let selected = self.selected_bytes();
+            let clear = Button::new("clear")
+                .primary()
+                .small()
+                .label("Clear")
+                .disabled(!idle || selected < 1e6)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.clear_selected(cx);
+                    cx.notify();
+                }));
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .gap_3()
+                .child(heading(
+                    self.clean_status(&items),
+                    Some(clear.into_any_element()),
+                ))
+                .child(self.treemap(&items, cx))
+        };
         v_flex()
             .flex_1()
             .min_h_0()
             .gap_3()
             .children(self.dev_row(&items, cx))
-            .child(header)
-            .child(map)
+            .child(body)
             .into_any_element()
     }
 }
@@ -1746,6 +1811,7 @@ impl Render for Card {
                     this.dismiss_apps(cx);
                 } else if this.docker.is_some() {
                     this.dismiss_docker(cx);
+                } else if this.files_dismiss() {
                 } else {
                     this.confirm = None;
                 }

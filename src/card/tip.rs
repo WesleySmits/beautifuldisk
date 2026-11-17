@@ -130,6 +130,27 @@ impl Tip {
         }
     }
 
+    /// Plain rows: what, what happens to it, and whether it stays.
+    pub(super) fn rows(
+        title: String,
+        size: String,
+        rows: Vec<(String, Option<String>, bool)>,
+    ) -> Self {
+        let more = rows.len().saturating_sub(ROWS);
+        Self {
+            icon: None,
+            title,
+            size,
+            note: None,
+            rows: rows
+                .into_iter()
+                .take(ROWS)
+                .map(|(what, how, kept)| Row { what, how, kept })
+                .collect(),
+            more,
+        }
+    }
+
     pub(super) fn view(self, cx: &mut App) -> AnyView {
         cx.new(|_| self).into()
     }
