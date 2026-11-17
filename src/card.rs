@@ -22,6 +22,7 @@ mod apps;
 mod confirm;
 mod onboarding;
 mod scroll;
+mod tip;
 mod update;
 
 const BG: u32 = 0x161618;
@@ -1077,6 +1078,7 @@ impl Card {
         }
 
         let idle = self.phase == Phase::Idle;
+        let all = self.items.clone();
         let mut labels = Vec::new();
         for (i, item) in items.iter().enumerate() {
             let r = inset(tiles[i]);
@@ -1136,6 +1138,10 @@ impl Card {
                     .w(px(r.w))
                     .h(px(r.h))
                     .when(idle, |tile| tile.cursor_pointer())
+                    .when_some(all.clone().filter(|_| idle), |tile, all| {
+                        let size = self.item_shown[i];
+                        tile.tooltip(move |_, cx| tip::Tip::item(&all[i], size).view(cx))
+                    })
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         if this.phase != Phase::Idle || this.autoplay {
                             return;
@@ -1182,6 +1188,11 @@ impl Card {
                     .justify_between()
                     .text_color(rgb(if on { FG } else { 0x77777c }))
                     .when(idle, |tile| tile.cursor_pointer())
+                    .when_some(all.clone().filter(|_| idle), |tile, all| {
+                        let sizes: Vec<(usize, f64)> =
+                            members.iter().map(|&i| (i, self.item_shown[i])).collect();
+                        tile.tooltip(move |_, cx| tip::Tip::group(&all, sizes.clone()).view(cx))
+                    })
                     .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                         if this.phase != Phase::Idle || this.autoplay {
                             return;
