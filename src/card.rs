@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dither_gpui::dither_core::Tone;
 use dither_gpui::dither_core::ease::approach;
@@ -306,12 +306,12 @@ impl Card {
         }
         // Autoplay waits a moment so a screen recording catches the scan.
         if !autoplay && !card.onboard(cx) {
-            card.scan();
+            card.scan(cx);
         }
         card
     }
 
-    fn scan(&mut self) {
+    fn scan(&mut self, cx: &mut Context<Self>) {
         self.volume = if self.demo {
             disk::demo::VOLUME
         } else {
@@ -335,9 +335,35 @@ impl Card {
         } else {
             disk::scan(self.progress.clone());
         }
+        self.watch(cx);
     }
 
-    fn clear(&mut self, chosen: Vec<usize>) {
+    /// Redraws while a worker runs and nothing else does. Frames only run
+    /// while something animates, so without this a scan that settles before
+    /// its items are found would show them only on the next mouse move.
+    fn watch(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                let waiting = this.update(cx, |this, cx| {
+                    let waiting = this.phase != Phase::Idle
+                        || (this.items.is_none() && this.progress.items().is_none());
+                    if !this.animating {
+                        cx.notify();
+                    }
+                    waiting
+                });
+                if !matches!(waiting, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn clear(&mut self, chosen: Vec<usize>, cx: &mut Context<Self>) {
         let Some(items) = self.items.clone() else {
             return;
         };
@@ -347,10 +373,11 @@ impl Card {
         self.hover_group = false;
         self.dev_hover = false;
         clutter::clean(items, chosen, self.progress.clone(), self.demo);
+        self.watch(cx);
     }
 
-    fn clear_selected(&mut self) {
-        self.ask_clear(|this, i| this.selected[i] && !this.is_dev(i));
+    fn clear_selected(&mut self, cx: &mut Context<Self>) {
+        self.ask_clear(|this, i| this.selected[i] && !this.is_dev(i), cx);
     }
 
     fn is_dev(&self, i: usize) -> bool {
@@ -410,7 +437,7 @@ impl Card {
 
     /// Samples the worker, eases every animated value toward its target and
     /// says whether another frame is needed.
-    fn tick(&mut self) -> bool {
+    fn tick(&mut self, cx: &mut Context<Self>) -> bool {
         let dt = self.frame_time();
         if let Some(onboarding) = &mut self.onboarding {
             return onboarding.tick(dt);
@@ -590,7 +617,7 @@ impl Card {
                 self.group_glow = glow_to;
             }
         }
-        if self.autoplay && self.play_script() {
+        if self.autoplay && self.play_script(cx) {
             moving = true;
         }
         let cleaning = self.progress.cleaning();
@@ -706,12 +733,12 @@ impl Card {
 
     /// `--autoplay`: scans after a pause, hovers a few items once they are
     /// in, then clears. Returns whether the script is still waiting to act.
-    fn play_script(&mut self) -> bool {
+    fn play_script(&mut self, cx: &mut Context<Self>) -> bool {
         const HOVERS: [usize; 3] = [0, 3, 1];
         const HOLD: f32 = 0.6;
         if self.volume.total == 0 {
             if self.time > 2.0 {
-                self.scan();
+                self.scan(cx);
             }
             return true;
         }
@@ -728,7 +755,7 @@ impl Card {
                 true
             }
             None => {
-                self.clear_selected();
+                self.clear_selected(cx);
                 false
             }
         }
@@ -1445,7 +1472,7 @@ impl Card {
                                 .label("Clear")
                                 .disabled(!idle || !left)
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.ask_clear(|this, i| this.is_dev(i));
+                                    this.ask_clear(|this, i| this.is_dev(i), cx);
                                     cx.notify();
                                 })),
                         ),
@@ -1502,7 +1529,7 @@ impl Card {
                     .label("Clear")
                     .disabled(!idle || selected < 1e6)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.clear_selected();
+                        this.clear_selected(cx);
                         cx.notify();
                     })),
             );
@@ -1521,7 +1548,7 @@ impl Card {
 
 impl Render for Card {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.animating = self.tick();
+        self.animating = self.tick(cx);
         if self.animating {
             window.request_animation_frame();
         }
@@ -1583,7 +1610,7 @@ impl Render for Card {
                             .label("Rescan")
                             .disabled(!idle)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.scan();
+                                this.scan(cx);
                                 cx.notify();
                             })),
                     ),

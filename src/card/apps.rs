@@ -83,11 +83,11 @@ impl Card {
         .detach();
     }
 
-    fn close_apps(&mut self) {
+    fn close_apps(&mut self, cx: &mut Context<Self>) {
         if let Some(apps) = self.apps.take()
             && apps.changed
         {
-            self.scan();
+            self.scan(cx);
         }
     }
 
@@ -193,7 +193,7 @@ impl Card {
                             .icon(IconName::Close)
                             .disabled(apps.removing)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_apps();
+                                this.close_apps(cx);
                                 cx.notify();
                             })),
                     ),

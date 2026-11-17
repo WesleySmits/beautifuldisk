@@ -11,7 +11,11 @@ use super::{BG, Card, FG, LINE, MUTED, Phase, gb, tilde};
 impl Card {
     /// Asks before clearing the items `pick` says, from the treemap or the
     /// developer row. Autoplay clears right away.
-    pub(super) fn ask_clear(&mut self, pick: impl Fn(&Self, usize) -> bool) {
+    pub(super) fn ask_clear(
+        &mut self,
+        pick: impl Fn(&Self, usize) -> bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(items) = &self.items else {
             return;
         };
@@ -22,7 +26,7 @@ impl Card {
             return;
         }
         if self.autoplay {
-            self.clear(chosen);
+            self.clear(chosen, cx);
         } else {
             self.hover = None;
             self.hover_item = None;
@@ -133,7 +137,7 @@ impl Card {
                             .label("Clear")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(chosen) = this.confirm.take() {
-                                    this.clear(chosen);
+                                    this.clear(chosen, cx);
                                 }
                                 cx.notify();
                             })),

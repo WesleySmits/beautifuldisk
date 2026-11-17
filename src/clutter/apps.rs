@@ -2,11 +2,11 @@
 //! versions, Chrome's on-device models, Steam, Flatpak and Snap caches and
 //! more. Sized by reading the folders directly, since the scan skips them.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use super::{Found, How, Pick, category_of, count, dir_size, run_for};
+use super::{Found, How, Pick, category_of, count, dir_size};
 use crate::access;
 use crate::disk::Category;
 use crate::icons::{Logo, Source};
@@ -392,6 +392,8 @@ fn sandboxed(home: &Path, roots: &[(PathBuf, Category)]) -> Vec<Found> {
 }
 
 /// Old versions of what Homebrew installed, removed by Homebrew itself.
+/// Sized by reading the Cellar: `brew cleanup --dry-run` gives the same
+/// answer but takes seconds.
 fn brew() -> Vec<Found> {
     let Some(brew) = [
         "/opt/homebrew/bin/brew",
@@ -403,22 +405,10 @@ fn brew() -> Vec<Found> {
     .find(|p| p.exists()) else {
         return Vec::new();
     };
-    const ARGS: &[&str] = &["cleanup", "--prune=all"];
-    let Some(out) = run_for(
-        std::process::Command::new(&brew)
-            .args(ARGS)
-            .arg("--dry-run")
-            .env("HOMEBREW_NO_AUTO_UPDATE", "1"),
-        Duration::from_secs(30),
-    ) else {
+    let Some(prefix) = brew.parent().and_then(Path::parent) else {
         return Vec::new();
     };
-    // The download cache is its own item.
-    let bytes = out
-        .lines()
-        .filter(|l| !l.contains("Caches/Homebrew") && !l.contains(".cache/Homebrew"))
-        .filter_map(brew_bytes)
-        .sum();
+    let bytes = old_kegs(prefix).iter().map(|keg| dir_size(keg)).sum();
     vec![Found {
         name: "Old Homebrew versions".into(),
         detail: "Versions Homebrew replaced with newer ones.".into(),
@@ -428,24 +418,37 @@ fn brew() -> Vec<Found> {
         category: Category::System,
         pick: Pick::Dev,
         bytes,
-        how: How::Run(brew, ARGS, bytes),
+        how: How::Run(brew, &["cleanup", "--prune=all"], bytes),
     }]
 }
 
-/// The size at the end of a dry-run line, like
-/// "Would remove: /opt/homebrew/Cellar/go/1.21 (12,000 files, 210.5MB)".
-fn brew_bytes(line: &str) -> Option<u64> {
-    let size = line.strip_suffix(')')?.rsplit(", ").next()?;
-    let split = size.find(|c: char| c.is_ascii_alphabetic())?;
-    let (number, unit) = size.split_at(split);
-    let scale = match unit {
-        "B" => 1.0,
-        "KB" => 1024.0,
-        "MB" => 1024.0 * 1024.0,
-        "GB" => 1024.0 * 1024.0 * 1024.0,
-        _ => return None,
-    };
-    Some((number.parse::<f64>().ok()? * scale) as u64)
+/// Installed versions `brew cleanup` removes: all but the one in use, except
+/// linked or pinned ones, ones another keg needs (`.keepme`), and ones
+/// without an install receipt, which Homebrew leaves alone.
+fn old_kegs(prefix: &Path) -> Vec<PathBuf> {
+    let current = |dir: &str, name: &OsStr| fs::canonicalize(prefix.join(dir).join(name)).ok();
+    let mut old = Vec::new();
+    for formula in children(&prefix.join("Cellar")) {
+        let Some(name) = formula.file_name() else {
+            continue;
+        };
+        // Without a version in use, Homebrew can't tell which to keep.
+        let Some(in_use) = current("opt", name) else {
+            continue;
+        };
+        let keep = [
+            Some(in_use),
+            current("var/homebrew/linked", name),
+            current("var/homebrew/pinned", name),
+        ];
+        old.extend(children(&formula).into_iter().filter(|keg| {
+            let keg_path = fs::canonicalize(keg).ok();
+            !keep.contains(&keg_path)
+                && keg.join("INSTALL_RECEIPT.json").is_file()
+                && !keg.join(".keepme").exists()
+        }));
+    }
+    old
 }
 
 #[cfg(test)]
@@ -453,9 +456,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_brew_sizes() {
-        let line = "Would remove: /opt/homebrew/Cellar/go/1.21 (12,000 files, 210.5MB)";
-        assert_eq!(brew_bytes(line), Some((210.5 * 1024.0 * 1024.0) as u64));
-        assert_eq!(brew_bytes("==> This operation would free 1GB"), None);
+    fn finds_old_homebrew_versions() {
+        let prefix = std::env::temp_dir().join(format!("bd-brew-{}", std::process::id()));
+        let keg = |name: &str, version: &str, receipt: bool| {
+            let dir = prefix.join("Cellar").join(name).join(version);
+            fs::create_dir_all(&dir).unwrap();
+            if receipt {
+                fs::write(dir.join("INSTALL_RECEIPT.json"), "{}").unwrap();
+            }
+        };
+        let link = |dir: &str, name: &str, version: &str| {
+            let at = prefix.join(dir);
+            fs::create_dir_all(&at).unwrap();
+            std::os::unix::fs::symlink(
+                prefix.join("Cellar").join(name).join(version),
+                at.join(name),
+            )
+            .unwrap();
+        };
+        keg("go", "1.21", true);
+        keg("go", "1.22", true);
+        link("opt", "go", "1.22");
+        // No receipt: Homebrew leaves it.
+        keg("tailscale", "1.0", false);
+        keg("tailscale", "1.1", true);
+        link("opt", "tailscale", "1.1");
+        keg("node", "20", true);
+        keg("node", "22", true);
+        link("opt", "node", "22");
+        link("var/homebrew/pinned", "node", "20");
+
+        let old = old_kegs(&prefix);
+        fs::remove_dir_all(&prefix).unwrap();
+        assert_eq!(old, [prefix.join("Cellar/go/1.21")]);
     }
 }

@@ -297,12 +297,12 @@ impl Card {
     #[cfg(not(target_os = "macos"))]
     fn show_helper(&mut self, _cx: &mut Context<Self>) {}
 
-    fn finish_onboarding(&mut self) {
+    fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
         let Some(o) = self.onboarding.take() else {
             return;
         };
         access::save(&disk::home(), &o.allowed());
-        self.scan();
+        self.scan(cx);
     }
 
     pub(super) fn render_onboarding(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -430,7 +430,7 @@ impl Card {
                             .label("Scan")
                             .disabled(asking)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.finish_onboarding();
+                                this.finish_onboarding(cx);
                                 cx.notify();
                             })),
                     ),

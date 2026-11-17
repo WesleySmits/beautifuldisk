@@ -144,11 +144,11 @@ impl Card {
         self.reread_docker(cx);
     }
 
-    fn close_docker(&mut self) {
+    fn close_docker(&mut self, cx: &mut Context<Self>) {
         if let Some(panel) = self.docker.take()
             && panel.changed
         {
-            self.scan();
+            self.scan(cx);
         }
     }
 
@@ -293,7 +293,7 @@ impl Card {
                     .icon(IconName::Close)
                     .disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.close_docker();
+                        this.close_docker(cx);
                         cx.notify();
                     })),
             );
