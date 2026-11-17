@@ -10,8 +10,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession,
-    NSDraggingSource, NSRunningApplication, NSScreen, NSView, NSWorkspace,
+    NSApplication, NSApplicationActivationOptions, NSDragOperation, NSDraggingContext,
+    NSDraggingItem, NSDraggingSession, NSDraggingSource, NSRunningApplication, NSScreen, NSView,
+    NSWorkspace,
 };
 use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID};
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString, NSURL};
@@ -33,6 +34,24 @@ define_class!(
             _context: NSDraggingContext,
         ) -> NSDragOperation {
             NSDragOperation::Copy | NSDragOperation::Generic
+        }
+
+        /// Pressing on the helper made this app active, so System Settings'
+        /// password prompt for the drop wouldn't get the keyboard. Hand
+        /// activation back to Settings.
+        #[unsafe(method(draggingSession:endedAtPoint:operation:))]
+        fn ended(
+            &self,
+            _session: &NSDraggingSession,
+            _point: NSPoint,
+            _operation: NSDragOperation,
+        ) {
+            let settings = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+                &NSString::from_str("com.apple.systempreferences"),
+            );
+            if let Some(settings) = settings.firstObject() {
+                settings.activateWithOptions(NSApplicationActivationOptions::empty());
+            }
         }
     }
 );

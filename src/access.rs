@@ -71,38 +71,59 @@ fn saved_path(home: &Path) -> PathBuf {
     home.join("Library/Application Support/beautifuldisk/access")
 }
 
-/// Loads the user's choices. True when the first launch list is still to
-/// be shown.
-pub fn load(home: &Path) -> bool {
+/// Folders allowed so far while the first launch list is open, so quitting
+/// midway (as macOS asks after Full Disk Access) doesn't lose them.
+fn progress_path(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/beautifuldisk/access-progress")
+}
+
+fn read(path: &Path) -> Option<Vec<Folder>> {
+    let saved = fs::read_to_string(path).ok()?;
+    Some(
+        Folder::ALL
+            .into_iter()
+            .filter(|f| saved.lines().any(|line| line == f.name()))
+            .collect(),
+    )
+}
+
+fn write(path: &Path, folders: &[Folder]) {
+    let text: String = folders.iter().map(|f| format!("{}\n", f.name())).collect();
+    let written = fs::create_dir_all(path.parent().unwrap()).and_then(|_| fs::write(path, text));
+    if let Err(err) = written {
+        eprintln!("could not save folder choices: {err}");
+    }
+}
+
+/// Loads the user's choices. While the first launch list is still to be
+/// shown, returns the folders already allowed in it.
+pub fn load(home: &Path) -> Option<Vec<Folder>> {
     if !cfg!(target_os = "macos") {
-        return false;
+        return None;
     }
     // Full Disk Access covers every folder without a prompt.
     if full_disk(home) {
         set(&Folder::ALL);
-        return false;
+        return None;
     }
-    let Ok(saved) = fs::read_to_string(saved_path(home)) else {
-        set(&[]);
-        return true;
-    };
-    let folders: Vec<Folder> = Folder::ALL
-        .into_iter()
-        .filter(|f| saved.lines().any(|line| line == f.name()))
-        .collect();
-    set(&folders);
-    false
+    if let Some(folders) = read(&saved_path(home)) {
+        set(&folders);
+        return None;
+    }
+    set(&[]);
+    Some(read(&progress_path(home)).unwrap_or_default())
+}
+
+/// Remembers the folders allowed so far in the first launch list.
+pub fn save_progress(home: &Path, folders: &[Folder]) {
+    write(&progress_path(home), folders);
 }
 
 /// Saves which folders to scan and applies them to the next scan.
 pub fn save(home: &Path, folders: &[Folder]) {
     set(folders);
-    let path = saved_path(home);
-    let text: String = folders.iter().map(|f| format!("{}\n", f.name())).collect();
-    let saved = fs::create_dir_all(path.parent().unwrap()).and_then(|_| fs::write(&path, text));
-    if let Err(err) = saved {
-        eprintln!("could not save folder choices: {err}");
-    }
+    write(&saved_path(home), folders);
+    let _ = fs::remove_file(progress_path(home));
 }
 
 /// Reads `folder`, which makes macOS ask the first time. Blocks until the
@@ -115,10 +136,14 @@ pub fn request(home: &Path, folder: Folder) -> bool {
     }
 }
 
-/// Whether the app has Full Disk Access. The permissions database is
-/// readable only with it, and checking it never prompts.
+/// Whether the app has Full Disk Access. Safari's and Mail's folders are
+/// readable only with it, and reading them never prompts. (The user's
+/// permissions database stays closed even with it on recent macOS.)
 pub fn full_disk(home: &Path) -> bool {
-    fs::File::open(home.join("Library/Application Support/com.apple.TCC/TCC.db")).is_ok()
+    ["Library/Safari", "Library/Mail"]
+        .iter()
+        .any(|dir| fs::read_dir(home.join(dir)).is_ok())
+        || fs::File::open("/Library/Application Support/com.apple.TCC/TCC.db").is_ok()
 }
 
 pub const FULL_DISK_SETTINGS: &str =

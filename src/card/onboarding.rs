@@ -25,6 +25,8 @@ const TEXT_SPACE: f32 = 0.5;
 
 pub(super) struct Onboarding {
     folders: [Ask; 3],
+    /// What was last saved as allowed, to save again only on a change.
+    saved: Vec<Folder>,
     full_disk: bool,
     hover: Option<usize>,
     glow: [f32; ROWS],
@@ -34,9 +36,18 @@ pub(super) struct Onboarding {
 }
 
 impl Onboarding {
-    fn new() -> Self {
+    /// `allowed`: folders allowed before the app last quit.
+    fn new(allowed: Vec<Folder>) -> Self {
+        let folders = Folder::ALL.map(|f| {
+            if allowed.contains(&f) {
+                Ask::Allowed
+            } else {
+                Ask::Waiting
+            }
+        });
         Self {
-            folders: [Ask::Waiting; 3],
+            folders,
+            saved: allowed,
             full_disk: false,
             hover: None,
             glow: [0.0; ROWS],
@@ -124,10 +135,13 @@ fn chip() -> Div {
 impl Card {
     /// Shows the folder list instead of scanning, if this is the first launch.
     pub(super) fn onboard(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.demo || !access::load(&disk::home()) {
+        if self.demo {
             return false;
         }
-        self.onboarding = Some(Onboarding::new());
+        let Some(allowed) = access::load(&disk::home()) else {
+            return false;
+        };
+        self.onboarding = Some(Onboarding::new(allowed));
         // Picks up changes made in System Settings: a folder turned on after
         // it was denied, or Full Disk Access. Checking these never prompts.
         cx.spawn(async move |this, cx| {
@@ -156,6 +170,11 @@ impl Card {
                     }
                     if changed {
                         cx.notify();
+                    }
+                    let allowed = o.allowed();
+                    if allowed != o.saved {
+                        access::save_progress(&home, &allowed);
+                        o.saved = allowed;
                     }
                     true
                 });
