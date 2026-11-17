@@ -20,6 +20,7 @@ use crate::treemap::{self, Rect};
 
 mod apps;
 mod confirm;
+mod docker_panel;
 mod onboarding;
 mod scroll;
 mod tip;
@@ -83,6 +84,39 @@ fn duo(name: &'static str, tone: Tone, size: f32) -> Div {
         .size(px(size))
         .child(layer("base", tone.shade(0.22)))
         .child(layer("accent", tone.base()))
+}
+
+/// A big figure and a smaller note on one baseline. GPUI's flex can't align
+/// text baselines, so both sit on the bottom edge and the note is lifted by
+/// the difference. Figtree's ascent and descent are 0.95 and 0.25 em, and
+/// GPUI centers that 1.2 em box in the line, so with lines of 1.3 em the
+/// baseline sits 0.3 em above the bottom.
+fn figure(
+    big: impl Into<SharedString>,
+    big_size: f32,
+    note: impl Into<SharedString>,
+    note_size: f32,
+) -> Div {
+    const LINE: f32 = 1.3;
+    const ABOVE_BOTTOM: f32 = LINE / 2.0 - (0.95 - 0.25) / 2.0;
+    h_flex()
+        .items_end()
+        .gap_1p5()
+        .child(
+            div()
+                .text_size(px(big_size))
+                .line_height(relative(LINE))
+                .font_weight(FontWeight::MEDIUM)
+                .child(big.into()),
+        )
+        .child(
+            div()
+                .text_size(px(note_size))
+                .line_height(relative(LINE))
+                .pb(px((big_size - note_size) * ABOVE_BOTTOM))
+                .text_color(rgb(MUTED))
+                .child(note.into()),
+        )
 }
 
 fn gb(bytes: f64) -> String {
@@ -183,6 +217,10 @@ pub struct Card {
     onboarding: Option<onboarding::Onboarding>,
     /// The panel for removing apps, while it is open.
     apps: Option<apps::Apps>,
+    /// The Docker panel, while it is open.
+    docker: Option<docker_panel::DockerPanel>,
+    /// The docker CLI, when installed.
+    docker_bin: Option<std::path::PathBuf>,
     /// Linux: a newer release, once found.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     update: Option<update::Update>,
@@ -255,6 +293,12 @@ impl Card {
             was_cleaning: 0,
             onboarding: None,
             apps: None,
+            docker: None,
+            docker_bin: if demo {
+                Some("docker".into())
+            } else {
+                crate::docker::find()
+            },
             update: None,
         };
         if cfg!(not(target_os = "macos")) && !demo {
@@ -635,6 +679,11 @@ impl Card {
 
         if let Some(apps) = &mut self.apps
             && apps.tick(dt)
+        {
+            moving = true;
+        }
+        if let Some(docker) = &mut self.docker
+            && docker.tick(dt)
         {
             moving = true;
         }
@@ -1443,23 +1492,7 @@ impl Card {
                     .flex_1()
                     .min_w_0()
                     .gap_1()
-                    .child(
-                        h_flex()
-                            .items_baseline()
-                            .gap_1p5()
-                            .child(
-                                div()
-                                    .text_size(px(20.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(gb(selected)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(MUTED))
-                                    .child("can go"),
-                            ),
-                    )
+                    .child(figure(gb(selected), 20.0, "can go", 13.0))
                     .child(div().h(px(18.0)).child(self.clean_status(&items))),
             )
             .child(
@@ -1506,29 +1539,30 @@ impl Render for Card {
                     .flex_1()
                     .min_w_0()
                     .gap_1()
-                    .child(
-                        h_flex()
-                            .items_baseline()
-                            .gap_1p5()
-                            .child(
-                                div()
-                                    .text_size(px(26.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(gb(self.used_shown())),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(14.0))
-                                    .text_color(rgb(MUTED))
-                                    .child(format!("of {} used", capacity(self.volume.total))),
-                            ),
-                    )
+                    .child(figure(
+                        gb(self.used_shown()),
+                        26.0,
+                        format!("of {} used", capacity(self.volume.total)),
+                        14.0,
+                    ))
                     .child(div().h(px(18.0)).child(self.status_line())),
             )
             .child(
                 h_flex()
                     .gap_1()
                     .children(self.update_button(cx))
+                    .children(self.docker_bin.is_some().then(|| {
+                        Button::new("docker")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Container)
+                            .label("Docker")
+                            .disabled(!idle)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_docker(cx);
+                                cx.notify();
+                            }))
+                    }))
                     .child(
                         Button::new("apps")
                             .ghost()
@@ -1647,6 +1681,7 @@ impl Render for Card {
 
         let confirm = self.render_confirm(cx);
         let apps = self.render_apps(cx);
+        let docker = self.render_docker(cx);
         v_flex()
             .relative()
             .size_full()
@@ -1664,6 +1699,7 @@ impl Render for Card {
             .child(self.cleanup(cx))
             .children(confirm)
             .children(apps)
+            .children(docker)
             .into_any_element()
     }
 }

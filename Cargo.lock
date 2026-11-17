@@ -620,6 +620,7 @@ dependencies = [
  "rayon",
  "rodio",
  "self_update",
+ "serde_json",
 ]
 
 [[package]]

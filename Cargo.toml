@@ -9,6 +9,7 @@ gpui-kit = "=0.7.3"
 libc = "0.2.191"
 rayon = "1.12.0"
 rodio = { version = "0.23.0", default-features = false, features = ["playback"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 
 # Finder icons, FSEvents and the Full Disk Access helper.
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -1,4 +1,5 @@
-//! The treemap's hover card: what clearing a tile removes.
+//! The hover card for treemap tiles and Docker's old builds: what clearing
+//! removes, and what stays.
 
 use std::sync::Arc;
 
@@ -6,21 +7,43 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-use super::{FG, LINE, MUTED, gb, tilde};
+use super::docker_panel::{count, size};
+use super::{FG, LINE, MUTED, OK, gb, tilde};
 use crate::clutter::Item;
+use crate::docker::Builds;
 
 /// Rows shown before the rest are counted.
 const ROWS: usize = 6;
 
+#[derive(Clone)]
 pub(super) struct Tip {
     icon: Option<Arc<Image>>,
     title: String,
-    size: f64,
+    size: String,
     /// What happens to every row, when it is the same for all.
     note: Option<String>,
-    /// Path or name, and what happens to it or its size.
-    rows: Vec<(String, Option<String>)>,
+    rows: Vec<Row>,
     more: usize,
+}
+
+#[derive(Clone)]
+struct Row {
+    /// Path or name.
+    what: String,
+    /// What happens to it, or its size.
+    how: Option<String>,
+    /// Stays, so it reads green.
+    kept: bool,
+}
+
+impl Row {
+    fn new(what: String, how: Option<String>) -> Self {
+        Self {
+            what,
+            how,
+            kept: false,
+        }
+    }
 }
 
 impl Tip {
@@ -36,11 +59,11 @@ impl Tip {
         Self {
             icon: item.icon.clone(),
             title: item.name.clone(),
-            size,
+            size: gb(size),
             rows: targets
                 .into_iter()
                 .take(ROWS)
-                .map(|t| (tilde(&t.what), (!same).then_some(t.how)))
+                .map(|t| Row::new(tilde(&t.what), (!same).then_some(t.how)))
                 .collect(),
             note,
             more,
@@ -53,14 +76,57 @@ impl Tip {
         Self {
             icon: None,
             title: format!("{} more", members.len()),
-            size: members.iter().map(|m| m.1).sum(),
+            size: gb(members.iter().map(|m| m.1).sum()),
             note: None,
             more: members.len().saturating_sub(ROWS),
             rows: members
                 .into_iter()
                 .take(ROWS)
-                .map(|(i, size)| (items[i].name.clone(), Some(gb(size))))
+                .map(|(i, size)| Row::new(items[i].name.clone(), Some(gb(size))))
                 .collect(),
+        }
+    }
+
+    /// For one image name's builds: which stay, and what goes.
+    pub(super) fn builds(builds: &Builds) -> Self {
+        let kept = |what: String| Row {
+            what,
+            how: Some("Kept".into()),
+            kept: true,
+        };
+        let shown = ROWS - 3;
+        let mut rows: Vec<Row> = builds
+            .kept
+            .iter()
+            .take(shown)
+            .map(|(label, why)| kept(format!("{label}, {why}")))
+            .collect();
+        if builds.kept.len() > shown {
+            rows.push(kept(format!(
+                "{} more",
+                count(builds.kept.len() - shown, "build")
+            )));
+        }
+        rows.push(Row::new(
+            count(builds.older, "older build"),
+            Some("Removed".into()),
+        ));
+        if !builds.old.containers.is_empty() {
+            rows.push(Row::new(
+                format!(
+                    "{} on them",
+                    count(builds.old.containers.len(), "stopped container")
+                ),
+                Some("Removed with their logs".into()),
+            ));
+        }
+        Self {
+            icon: None,
+            title: builds.name.clone(),
+            size: size(builds.old.bytes),
+            note: None,
+            rows,
+            more: 0,
         }
     }
 
@@ -73,7 +139,7 @@ impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let muted = rgb(MUTED);
         // Paths keep their end, where they differ.
-        let row = |(what, how): &(String, Option<String>)| {
+        let row = |row: &Row| {
             h_flex()
                 .gap_3()
                 .min_w_0()
@@ -85,16 +151,18 @@ impl Render for Tip {
                         .whitespace_nowrap()
                         .text_ellipsis_start()
                         .text_color(rgb(FG))
-                        .child(what.clone()),
+                        .child(row.what.clone()),
                 )
-                .children(
-                    how.clone()
-                        .map(|how| div().flex_none().text_color(muted).child(how)),
-                )
+                .children(row.how.clone().map(|how| {
+                    div()
+                        .flex_none()
+                        .text_color(if row.kept { rgb(OK) } else { muted })
+                        .child(how)
+                }))
         };
         // Tooltips sit in their own layer, so a margin keeps the shadow and
         // the gap to the cursor inside it.
-        div().p_2().child(
+        div().p_2().font_family(crate::FONT).child(
             v_flex()
                 .w(px(380.0))
                 .p_3()
@@ -130,7 +198,7 @@ impl Render for Tip {
                                 .font_family("Menlo")
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(FG))
-                                .child(gb(self.size)),
+                                .child(self.size.clone()),
                         ),
                 )
                 .children(

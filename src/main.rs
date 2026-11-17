@@ -4,6 +4,7 @@ mod bulk;
 mod card;
 mod clutter;
 mod disk;
+mod docker;
 #[cfg(target_os = "macos")]
 mod fsevents;
 #[cfg(target_os = "macos")]
@@ -39,7 +40,10 @@ use gpui_kit::*;
 
 actions!(beautifuldisk, [Quit, CheckForUpdates]);
 
-assets::icon_assets!(ExtraIcons, [RefreshCw, LayoutGrid, ArrowDown]);
+assets::icon_assets!(
+    ExtraIcons,
+    [RefreshCw, LayoutGrid, ArrowDown, Container, Check]
+);
 
 /// The app's own two-layer icons from `assets/icons`, served as
 /// `icons/<name>.base.svg` and `icons/<name>.accent.svg`.
@@ -96,6 +100,9 @@ impl AssetSource for AppAssets {
     }
 }
 
+/// The app's typeface. Numbers in tiles stay in Menlo.
+pub const FONT: &str = "Figtree";
+
 fn main() {
     // `--demo` plays a scripted scan and clean with sample data and deletes nothing.
     // `--autoplay` is the demo playing itself: it hovers a few items, then clears.
@@ -113,6 +120,17 @@ fn main() {
     application().with_assets(AppAssets).run(move |cx| {
         init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
+        // Figtree from Google Fonts, bundled so it looks the same everywhere.
+        let fonts = [
+            include_bytes!("../assets/fonts/Figtree-Regular.ttf").as_slice(),
+            include_bytes!("../assets/fonts/Figtree-Medium.ttf"),
+            include_bytes!("../assets/fonts/Figtree-SemiBold.ttf"),
+            include_bytes!("../assets/fonts/Figtree-Bold.ttf"),
+        ];
+        let _ = cx
+            .text_system()
+            .add_fonts(fonts.into_iter().map(Cow::Borrowed).collect());
+        Theme::global_mut(cx).font_family = FONT.into();
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-w", Quit, None),

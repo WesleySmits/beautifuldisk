@@ -1858,16 +1858,7 @@ pub(crate) fn dir_size(path: &Path) -> u64 {
 /// Docker's build cache and unused images, as `docker system df` reports
 /// them. Volumes and containers are never touched.
 fn docker() -> Vec<Found> {
-    // Apps opened from Finder don't get the shell's PATH.
-    let Some(docker) = [
-        "/usr/bin/docker",
-        "/usr/local/bin/docker",
-        "/opt/homebrew/bin/docker",
-        "/Applications/Docker.app/Contents/Resources/bin/docker",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|p| p.exists()) else {
+    let Some(docker) = crate::docker::find() else {
         return Vec::new();
     };
     let Some(out) = run_for(
@@ -1890,7 +1881,7 @@ fn docker() -> Vec<Found> {
             name: "Docker build cache".into(),
             detail: REBUILT.into(),
             hue: 205.0,
-            icon: Source::App("com.docker.docker", None),
+            icon: Source::App("com.docker.docker", Some(Logo::Docker)),
             icon_file: None,
             category: Category::System,
             pick: Pick::Dev,
@@ -1901,7 +1892,7 @@ fn docker() -> Vec<Found> {
             name: "Docker images".into(),
             detail: "Images no container uses. Pulled again when needed.".into(),
             hue: 210.0,
-            icon: Source::App("com.docker.docker", None),
+            icon: Source::App("com.docker.docker", Some(Logo::Docker)),
             icon_file: None,
             category: Category::System,
             pick: Pick::Off,
@@ -1912,7 +1903,7 @@ fn docker() -> Vec<Found> {
 }
 
 /// Docker's sizes, like "1.25GB" or "512kB" (powers of 1000).
-fn docker_bytes(size: &str) -> Option<u64> {
+pub(crate) fn docker_bytes(size: &str) -> Option<u64> {
     let split = size.find(|c: char| c.is_ascii_alphabetic())?;
     let (number, unit) = size.split_at(split);
     let scale = match unit {

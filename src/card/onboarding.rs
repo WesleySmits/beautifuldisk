@@ -480,6 +480,7 @@ impl Render for Helper {
         };
         div()
             .size_full()
+            .font_family(crate::FONT)
             .bg(rgb(BG))
             .text_color(rgb(FG))
             .text_size(px(13.0))
