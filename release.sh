@@ -2,6 +2,7 @@
 # Publishes a GitHub release that installed copies update to. Bump the
 # version in Cargo.toml first.
 #   ./release.sh [beautiful-disk-linux-x86_64.tar.gz]
+# Build the Linux tarball on Linux with ./bundle-linux.sh first.
 # The Mac app updates through Sparkle: appcast.xml lists the DMG, signed with
 # the Sparkle key in the login keychain (account "beautifuldisk"). Linux
 # copies download the tarball, which holds the beautifuldisk binary.

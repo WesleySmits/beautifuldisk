@@ -28,25 +28,14 @@
 
 ## Install
 
-### macOS
-
-Download `Beautiful-Disk.dmg` from the [latest release](https://github.com/vkpdeveloper/beautifuldisk/releases/latest) and drag the app to Applications.
-
-The app is not notarized yet. On first launch, right-click it and choose Open, or run:
-
-```sh
-xattr -dr com.apple.quarantine "/Applications/Beautiful Disk.app"
-```
-
-Needs a Mac with Apple silicon.
-
-### Linux
-
 ```sh
 curl -fsSL https://raw.githubusercontent.com/vkpdeveloper/beautifuldisk/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin` with an app menu entry. Needs x86_64, X11 or Wayland, and Vulkan drivers.
+Works on Macs with Apple silicon and on x86_64 Linux, then opens the app. Run it again to update.
+
+- **macOS:** installs `Beautiful Disk.app` in `/Applications`. You can also download `Beautiful-Disk.dmg` from the [latest release](https://github.com/vkpdeveloper/beautifuldisk/releases/latest) and drag the app to Applications. The app is not notarized yet, so a copy from the DMG opens the first time with right-click, Open.
+- **Linux:** installs to `~/.local/bin` with an app menu entry. Needs X11 or Wayland and Vulkan drivers.
 
 ## Build
 
@@ -54,6 +43,7 @@ Installs to `~/.local/bin` with an app menu entry. Needs x86_64, X11 or Wayland,
 cargo run --release            # run it
 cargo run --release -- --demo  # sample data, deletes nothing
 ./bundle.sh --dmg              # Beautiful Disk.app and the DMG in target/release
+./bundle-linux.sh              # on Linux: the release tarball in target/release
 ```
 
 The launch video is made with [Remotion](https://www.remotion.dev) in [`launch-video/`](launch-video), from a recording of the app in `--autoplay` mode.
