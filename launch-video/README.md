@@ -1,6 +1,6 @@
 # Launch video
 
-The 15 second launch video, built with Remotion from a recording of the app.
+The 39 second launch video, built with Remotion from a recording of the app.
 
 ```sh
 bun install

@@ -5,9 +5,9 @@ import {DitherText, DotField, Dust, FPS, MONO, TONES, clamp} from "../dither";
 const W = 1920;
 const FG = "#ededef";
 const MUTED = "#8b8b90";
-const FREED = 107.1;
+const FREED = 82.9;
 
-/** 10 to 15s: the payoff count, then the name. */
+/** The payoff count, then the name and where to get it. */
 export const Outro: React.FC = () => {
   const frame = useCurrentFrame();
   const t = frame / FPS;
@@ -78,7 +78,18 @@ export const Outro: React.FC = () => {
               opacity: tagline,
             }}
           >
-            For macOS
+            For macOS and Linux
+          </div>
+          <div
+            style={{
+              marginTop: 40,
+              color: MUTED,
+              fontFamily: MONO,
+              fontSize: 32,
+              opacity: clamp((t - 3.3) / 0.4),
+            }}
+          >
+            github.com/vkpdeveloper/beautifuldisk
           </div>
         </AbsoluteFill>
       )}

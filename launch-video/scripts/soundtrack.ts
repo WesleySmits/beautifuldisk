@@ -6,15 +6,20 @@ import {readFileSync, writeFileSync} from "node:fs";
 //   bun scripts/soundtrack.ts
 
 const RATE = 44_100;
-const LENGTH = 15;
+const LENGTH = 39;
 const out = new Float32Array(RATE * LENGTH);
 
-// The recording's sound log is in app seconds; this many seconds later on
-// the video timeline (clip offset, crop start and scene start combined).
-const APP_TO_VIDEO = 0.203;
-// Only the part of the recording the video shows.
-const APP_FROM = 2.0;
-const APP_TO = 9.8;
+// The recording's sound log is in app seconds, 0.665s ahead of the take.
+// Each app scene shows a stretch of the take; these match src/Launch.tsx.
+const LOG_TO_TAKE = -0.665;
+const SEGMENTS = [
+  {take: 1.2, video: 2, length: 8},
+  {take: 9.3, video: 16, length: 10.5},
+];
+const takeToVideo = (take: number) => {
+  for (const s of SEGMENTS) if (take >= s.take && take < s.take + s.length) return take - s.take + s.video;
+  return undefined;
+};
 
 let seed = 0x9e3779b9;
 const random = () => {
@@ -84,23 +89,41 @@ for (let o = 0; o < log.byteLength; ) {
   const samples = new Float32Array(len);
   for (let i = 0; i < len; i++) samples[i] = log.getFloat32(o + 12 + i * 4, true);
   o += 12 + len * 4;
-  if (at < APP_FROM || at > APP_TO) continue;
+  const video = takeToVideo(at + LOG_TO_TAKE);
+  if (video === undefined) continue;
   // Whooshes (long) are the payoff; ticks stay a texture.
-  mix(samples, at + APP_TO_VIDEO, len > 5000 ? 3.2 : 2.4);
+  mix(samples, video, len > 5000 ? 3.2 : 2.4);
 }
-// The app is silent while hovering; a soft tick marks each hover.
-for (const at of [6.45, 7.05, 7.65]) mix(tick(0.8, false, 0.006), at, 2.2);
+// The app is silent on hovers and clicks; a soft tick marks each one
+// (take seconds: three treemap hovers, then the files tour).
+for (const take of [6.0, 6.6, 7.2, 10.72, 11.52, 13.32, 14.52, 15.72, 16.34, 17.32]) {
+  const video = takeToVideo(take);
+  if (video !== undefined) mix(tick(0.8, false, 0.006), video, 2.2);
+}
+
+// Cuts into and out of the scenes drawn here.
+for (const cut of [10, 16, 26.5]) mix(whoosh(0.45, 5000, 500, 0.1), cut - 0.05, 1.6);
+// Features: a rising tick per row.
+for (let i = 0; i < 6; i++) mix(tick(0.3 + i * 0.12, false, 0.02), 10 + 0.7 + i * 0.42, 2.4);
+// Apps and Docker: each side lands, then its bar drains.
+for (const [land, drain] of [
+  [26.7, 27.4],
+  [28.2, 28.9],
+]) {
+  mix(tick(0.9, false, 0.03), land, 2.6);
+  mix(whoosh(1.1, 2500, 250, 0.3), drain, 2.2);
+}
 
 // Into the outro: the big bushh.
-mix(whoosh(0.45, 5000, 500, 0.1), 9.8, 1.6);
-mix(whoosh(1.4, 6500, 180, 0.38), 10.0, 4.2);
-mix(thump(), 10.0, 1.4);
+mix(whoosh(0.45, 5000, 500, 0.1), 31.8, 1.6);
+mix(whoosh(1.4, 6500, 180, 0.38), 32.0, 4.2);
+mix(thump(), 32.0, 1.4);
 // The counter rolls up.
-for (let t = 10.12; t < 11.0; t += 0.045) mix(tick((t - 10.12) / 0.9), t, 2.0);
+for (let t = 32.12; t < 33.0; t += 0.045) mix(tick((t - 32.12) / 0.9), t, 2.0);
 // Logo.
-mix(whoosh(0.6, 3000, 300, 0.16), 12.15, 1.8);
-mix(tick(1, false, 0.05), 12.35, 3.0);
-mix(tick(0.6, false, 0.05), 12.47, 2.2);
+mix(whoosh(0.6, 3000, 300, 0.16), 34.15, 1.8);
+mix(tick(1, false, 0.05), 34.35, 3.0);
+mix(tick(0.6, false, 0.05), 34.47, 2.2);
 
 // Master: soft clip, then peak at -1 dB.
 let peak = 0;
