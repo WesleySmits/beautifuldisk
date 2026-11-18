@@ -35,13 +35,17 @@ mod icons;
 mod sound;
 mod tree;
 mod treemap;
+mod ui;
 
 use std::borrow::Cow;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 
-actions!(beautifuldisk, [Quit, CheckForUpdates, Dismiss]);
+actions!(
+    beautifuldisk,
+    [Quit, CheckForUpdates, Dismiss, ZoomIn, ZoomOut, ZoomReset]
+);
 
 assets::icon_assets!(
     ExtraIcons,
@@ -138,8 +142,16 @@ fn main() {
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-w", Quit, None),
             KeyBinding::new("escape", Dismiss, Some("Card")),
+            // "secondary" is Cmd on macOS and Ctrl on Linux.
+            KeyBinding::new("secondary-=", ZoomIn, None),
+            KeyBinding::new("secondary-+", ZoomIn, None),
+            KeyBinding::new("secondary--", ZoomOut, None),
+            KeyBinding::new("secondary-0", ZoomReset, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &ZoomIn, cx| ui::change(ui::Change::In, cx));
+        cx.on_action(|_: &ZoomOut, cx| ui::change(ui::Change::Out, cx));
+        cx.on_action(|_: &ZoomReset, cx| ui::change(ui::Change::Reset, cx));
         #[cfg(target_os = "macos")]
         {
             cx.on_action(|_: &CheckForUpdates, _| update::check());
@@ -153,14 +165,11 @@ fn main() {
             }
         }
 
-        // Room for the cleanup list, but never more than 70% of the screen.
         let screen = cx
             .primary_display()
             .map_or(size(px(1440.0), px(900.0)), |d| d.bounds().size);
-        let window = size(
-            px(720.0).min(screen.width * 0.7),
-            px(680.0).min(screen.height * 0.7),
-        );
+        ui::set(ui::initial(screen), cx);
+        let window = ui::window_size(screen);
         let options = WindowOptions {
             window_bounds: Some(match at {
                 Some((x, y)) => WindowBounds::Windowed(Bounds::new(point(px(x), px(y)), window)),

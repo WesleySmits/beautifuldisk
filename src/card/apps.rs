@@ -15,6 +15,7 @@ use gpui_kit::*;
 use super::scroll::{Scroll, measure};
 use super::{BG, Card, FG, LINE, MUTED, Phase, duo, gb, icon, tilde, tone};
 use crate::disk::{self, Category};
+use crate::ui::z;
 use crate::uninstall::{self, App};
 
 #[derive(Default)]
@@ -176,11 +177,11 @@ impl Card {
 
         let panel = v_flex()
             .w_full()
-            .max_w(px(640.0))
+            .max_w(z(640.0))
             .max_h_full()
             .p_5()
             .gap_3()
-            .rounded(px(12.0))
+            .rounded(z(12.0))
             .border_1()
             .border_color(rgb(LINE))
             .bg(rgb(0x1c1c1f))
@@ -189,7 +190,7 @@ impl Card {
                     .justify_between()
                     .child(
                         div()
-                            .text_size(px(20.0))
+                            .text_size(z(20.0))
                             .font_weight(FontWeight::MEDIUM)
                             .child("Apps"),
                     )
@@ -227,7 +228,7 @@ impl Card {
         let muted = rgb(MUTED);
         let reveal = apps.reveal.get(i).copied().unwrap_or(0.0);
         let icon = match &app.icon {
-            Some(image) => img(image.clone()).size(px(20.0)).into_any_element(),
+            Some(image) => img(image.clone()).size(z(20.0)).into_any_element(),
             None => duo(icon(Category::Apps), tone(Category::Apps), 16.0).into_any_element(),
         };
         let head = h_flex()
@@ -246,7 +247,7 @@ impl Card {
             }))
             .child(
                 div()
-                    .size(px(20.0))
+                    .size(z(20.0))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -277,13 +278,13 @@ impl Card {
                             .flex_1()
                             .min_w_0()
                             .font_family("Menlo")
-                            .text_size(px(11.5))
+                            .text_size(z(12.0))
                             .text_color(rgb(FG))
                             .child(tilde(&path.to_string_lossy())),
                     )
                     .child(
                         div()
-                            .text_size(px(11.5))
+                            .text_size(z(12.0))
                             .text_color(muted)
                             .child(gb(*bytes as f64)),
                     )
@@ -301,7 +302,7 @@ impl Card {
                     }
                 }))
                 .gap_2()
-                .pl(px(28.0))
+                .pl(z(28.0))
                 .pb_3()
                 .children(files)
                 .children(cfg!(not(target_os = "macos")).then(|| {

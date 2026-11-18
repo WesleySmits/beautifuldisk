@@ -5,6 +5,8 @@ use dither_gpui::dither_core::{Rgba, Tone};
 use dither_gpui::hsla;
 use gpui_kit::{Bounds, Pixels, Window, fill, point, px, size};
 
+use crate::ui::{s, snap};
+
 /// Same dot grid as the usage bar, so the two read as one surface.
 /// Finer than the usage bar: tiles are big, and dense pixels read as a
 /// gradient instead of scattered dots.
@@ -145,6 +147,7 @@ pub fn paint(
     time: f32,
     window: &mut Window,
 ) {
+    let (cell, dot_size) = (snap(CELL), snap(DOT));
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     if w < 2.0 || h < 2.0 {
         return;
@@ -161,7 +164,7 @@ pub fn paint(
     };
     window.paint_quad(
         fill(bounds, hsla(bg))
-            .corner_radii(px(RADIUS.min(w / 2.0).min(h / 2.0)))
+            .corner_radii(px(s(RADIUS).min(w / 2.0).min(h / 2.0)))
             .border_widths(px(1.0))
             .border_color(hsla(border)),
     );
@@ -170,18 +173,18 @@ pub fn paint(
         f32::from(bounds.origin.x - grid.x),
         f32::from(bounds.origin.y - grid.y),
     );
-    let first_col = ((gx + 2.0) / CELL).ceil() as i32;
-    let last_col = ((gx + w - 2.0 - DOT) / CELL).floor() as i32;
-    let first_row = ((gy + 2.0) / CELL).ceil() as i32;
-    let last_row = ((gy + h - 2.0 - DOT) / CELL).floor() as i32;
+    let first_col = ((gx + s(2.0)) / cell).ceil() as i32;
+    let last_col = ((gx + w - s(2.0) - dot_size) / cell).floor() as i32;
+    let first_row = ((gy + s(2.0)) / cell).ceil() as i32;
+    let last_row = ((gy + h - s(2.0) - dot_size) / cell).floor() as i32;
     let flicker = (time * 14.0) as i32;
     for row in first_row..=last_row {
-        let v = ((row as f32 * CELL - gy) / h).clamp(0.0, 1.0);
+        let v = ((row as f32 * cell - gy) / h).clamp(0.0, 1.0);
         if v < 1.0 - tile.reveal {
             continue;
         }
         for col in first_col..=last_col {
-            let u = ((col as f32 * CELL - gx) / w).clamp(0.0, 1.0);
+            let u = ((col as f32 * cell - gx) / w).clamp(0.0, 1.0);
             let fade = if tile.clear > 0.0 {
                 ((u - tile.clear) / 0.2).clamp(0.0, 1.0)
             } else {
@@ -212,8 +215,11 @@ pub fn paint(
                 }
                 alpha(Rgba::WHITE, 0.13 + 0.1 * glow)
             };
-            let at = grid + point(px(col as f32 * CELL), px(row as f32 * CELL));
-            window.paint_quad(fill(Bounds::new(at, size(px(DOT), px(DOT))), hsla(color)));
+            let at = grid + point(px(col as f32 * cell), px(row as f32 * cell));
+            window.paint_quad(fill(
+                Bounds::new(at, size(px(dot_size), px(dot_size))),
+                hsla(color),
+            ));
         }
     }
 }

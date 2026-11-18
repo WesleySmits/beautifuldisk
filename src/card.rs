@@ -17,6 +17,7 @@ use crate::clutter::{self, Item, Pick};
 use crate::disk::{self, Category, Progress, Report, Volume};
 use crate::sound::{Sound, Ticker};
 use crate::treemap::{self, Rect};
+use crate::ui::{self, s, z};
 
 mod apps;
 mod confirm;
@@ -84,7 +85,7 @@ fn duo(name: &'static str, tone: Tone, size: f32) -> Div {
     div()
         .relative()
         .flex_none()
-        .size(px(size))
+        .size(z(size))
         .child(layer("base", tone.shade(0.22)))
         .child(layer("accent", tone.base()))
 }
@@ -107,16 +108,16 @@ fn figure(
         .gap_1p5()
         .child(
             div()
-                .text_size(px(big_size))
+                .text_size(z(big_size))
                 .line_height(relative(LINE))
                 .font_weight(FontWeight::MEDIUM)
                 .child(big.into()),
         )
         .child(
             div()
-                .text_size(px(note_size))
+                .text_size(z(note_size))
                 .line_height(relative(LINE))
-                .pb(px((big_size - note_size) * ABOVE_BOTTOM))
+                .pb(z((big_size - note_size) * ABOVE_BOTTOM))
                 .text_color(rgb(MUTED))
                 .child(note.into()),
         )
@@ -540,10 +541,10 @@ impl Card {
             .filter(|_| self.phase == Phase::Idle && legend_w > 0.0);
         if let Some(c) = hovered {
             let i = c as usize;
-            let w = (legend_w - 2.0 * COL_GAP) / 3.0;
+            let w = (legend_w - 2.0 * s(COL_GAP)) / 3.0;
             let to = [
-                (i % 3) as f32 * (w + COL_GAP),
-                (i / 3) as f32 * (ROW_H + ROW_GAP),
+                (i % 3) as f32 * (w + s(COL_GAP)),
+                (i / 3) as f32 * s(ROW_H + ROW_GAP),
                 w,
             ];
             for k in 0..3 {
@@ -1048,7 +1049,7 @@ impl Card {
                 .children(
                     item.icon
                         .clone()
-                        .map(|icon| img(icon).size(px(14.0)).flex_none()),
+                        .map(|icon| img(icon).size(z(14.0)).flex_none()),
                 )
                 .child(
                     div()
@@ -1158,15 +1159,17 @@ impl Card {
         let cleaning = self.progress.cleaning();
         let weights = self.weights();
         let inset = |r: Rect| Rect {
-            x: r.x + treemap::GAP / 2.0,
-            y: r.y + treemap::GAP / 2.0,
-            w: (r.w - treemap::GAP).max(0.0),
-            h: (r.h - treemap::GAP).max(0.0),
+            x: r.x + s(treemap::GAP) / 2.0,
+            y: r.y + s(treemap::GAP) / 2.0,
+            w: (r.w - s(treemap::GAP)).max(0.0),
+            h: (r.h - s(treemap::GAP)).max(0.0),
         };
         let mut painted: Vec<(Rect, treemap::Tile)> = items
             .iter()
             .enumerate()
-            .filter(|&(i, _)| tiles[i].w >= treemap::GAP + 2.0 && tiles[i].h >= treemap::GAP + 2.0)
+            .filter(|&(i, _)| {
+                tiles[i].w >= s(treemap::GAP + 2.0) && tiles[i].h >= s(treemap::GAP + 2.0)
+            })
             .map(|(i, item)| {
                 let tile = treemap::Tile {
                     tone: item.tone,
@@ -1210,11 +1213,11 @@ impl Card {
             }
             let on = self.selected[i];
             let text = rgb(if on { FG } else { 0x77777c });
-            let small = r.w < 96.0 || r.h < 56.0;
-            let tiny = r.w < 34.0 || r.h < 30.0;
+            let small = r.w < s(96.0) || r.h < s(56.0);
+            let tiny = r.w < s(34.0) || r.h < s(30.0);
             let icon = item.icon.clone().map(|icon| {
                 img(icon)
-                    .size(px(if small { 14.0 } else { 17.0 }))
+                    .size(z(if small { 14.0 } else { 17.0 }))
                     .flex_none()
                     .grayscale(!on)
                     .opacity(if on { 1.0 } else { 0.5 })
@@ -1223,30 +1226,30 @@ impl Card {
                 v_flex()
                     .size_full()
                     .justify_between()
-                    .p(px(if small { 6.0 } else { 10.0 }))
+                    .p(z(if small { 6.0 } else { 10.0 }))
                     .overflow_hidden()
                     .when(!tiny, |label| {
                         label
-                            .child(h_flex().gap(px(7.0)).min_w_0().children(icon).when(
+                            .child(h_flex().gap(z(7.0)).min_w_0().children(icon).when(
                                 !small,
                                 |row| {
                                     row.child(
                                         div()
                                             .min_w_0()
                                             .truncate()
-                                            .text_size(px(12.5))
+                                            .text_size(z(12.5))
                                             .text_color(text)
                                             .child(item.name.clone()),
                                     )
                                 },
                             ))
-                            .when(r.h >= 44.0 && r.w >= 58.0, |label| {
+                            .when(r.h >= s(44.0) && r.w >= s(58.0), |label| {
                                 label.child(
                                     div()
                                         .whitespace_nowrap()
                                         .font_family("Menlo")
                                         .font_weight(FontWeight::BOLD)
-                                        .text_size(px(if small { 10.5 } else { 14.0 }))
+                                        .text_size(z(if small { 11.5 } else { 14.0 }))
                                         .text_color(text)
                                         .child(gb(self.item_shown[i])),
                                 )
@@ -1295,7 +1298,7 @@ impl Card {
         if let Some(r) = group {
             let on = members.iter().any(|&i| self.selected[i]);
             let shown: f64 = members.iter().map(|&i| self.item_shown[i]).sum();
-            let roomy = r.w >= 44.0 && r.h >= 44.0;
+            let roomy = r.w >= s(44.0) && r.h >= s(44.0);
             labels.push(
                 div()
                     .id("tile-more")
@@ -1304,7 +1307,7 @@ impl Card {
                     .top(px(r.y))
                     .w(px(r.w))
                     .h(px(r.h))
-                    .p(px(6.0))
+                    .p(z(6.0))
                     .overflow_hidden()
                     .flex()
                     .flex_col()
@@ -1333,7 +1336,7 @@ impl Card {
                     .child(
                         div()
                             .whitespace_nowrap()
-                            .text_size(px(11.5))
+                            .text_size(z(12.0))
                             .child(format!("{} more", members.len())),
                     )
                     .when(roomy, |tile| {
@@ -1342,7 +1345,7 @@ impl Card {
                                 .whitespace_nowrap()
                                 .font_family("Menlo")
                                 .font_weight(FontWeight::BOLD)
-                                .text_size(px(10.5))
+                                .text_size(z(11.5))
                                 .child(gb(shown)),
                         )
                     }),
@@ -1355,7 +1358,7 @@ impl Card {
         div()
             .relative()
             .flex_1()
-            .min_h(px(160.0))
+            .min_h(z(160.0))
             .w_full()
             .child(
                 // Clips the tiles that zooming slides past the edge.
@@ -1385,7 +1388,7 @@ impl Card {
                 canvas(
                     |_, _, _| {},
                     move |bounds, _, window, _| {
-                        let origin = bounds.origin + point(px(0.0), px(DUST));
+                        let origin = bounds.origin + point(px(0.0), z(DUST));
                         bar::paint_particles(&particles, origin, window);
                     },
                 )
@@ -1393,7 +1396,7 @@ impl Card {
                 .left_0()
                 .right_0()
                 .bottom_0()
-                .top(px(-DUST)),
+                .top(z(-DUST)),
             )
     }
 
@@ -1445,11 +1448,11 @@ impl Card {
                 .enumerate()
                 .map(|(k, icon)| {
                     div()
-                        .when(k > 0, |d| d.ml(px(-5.0)))
-                        .p(px(2.0))
+                        .when(k > 0, |d| d.ml(z(-5.0)))
+                        .p(z(2.0))
                         .rounded_full()
                         .bg(rgb(BG))
-                        .child(img(icon).size(px(18.0)))
+                        .child(img(icon).size(z(18.0)))
                 }),
         );
         let idle = self.phase == Phase::Idle;
@@ -1458,7 +1461,7 @@ impl Card {
                 .id("dev-caches")
                 .relative()
                 .flex_none()
-                .h(px(64.0))
+                .h(z(64.0))
                 .w_full()
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                     if this.phase == Phase::Idle && !this.autoplay {
@@ -1507,7 +1510,7 @@ impl Card {
                                 .child(
                                     div()
                                         .truncate()
-                                        .text_size(px(12.0))
+                                        .text_size(z(12.0))
                                         .text_color(muted)
                                         .child(detail),
                                 ),
@@ -1561,7 +1564,7 @@ impl Card {
     }
 
     fn cleanup(&self, cx: &mut Context<Self>) -> AnyElement {
-        let row = h_flex().h(px(30.0)).gap_2().items_center();
+        let row = h_flex().h(z(30.0)).gap_2().items_center();
         let Some(items) = self.items.clone() else {
             return row
                 .child(Spinner::new().small().color(rgb(MUTED).into()))
@@ -1585,7 +1588,7 @@ impl Card {
                         .min_w_0()
                         .gap_1()
                         .child(tabs)
-                        .child(div().h(px(18.0)).child(status)),
+                        .child(div().h(z(18.0)).child(status)),
                 )
                 .children(buttons)
         };
@@ -1642,6 +1645,7 @@ impl Card {
 
 impl Render for Card {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        ui::set_scale(window.scale_factor());
         self.animating = self.tick(cx);
         if self.animating {
             window.request_animation_frame();
@@ -1666,7 +1670,7 @@ impl Render for Card {
                         format!("of {} used", capacity(self.volume.total)),
                         14.0,
                     ))
-                    .child(div().h(px(18.0)).child(self.status_line())),
+                    .child(div().h(z(18.0)).child(self.status_line())),
             )
             .child(
                 h_flex()
@@ -1715,7 +1719,7 @@ impl Render for Card {
         let bar = div()
             .id("bar")
             .relative()
-            .h(px(54.0))
+            .h(z(54.0))
             .w_full()
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
                 if this.phase != Phase::Idle
@@ -1752,19 +1756,19 @@ impl Render for Card {
             .left(px(pill_x))
             .top(px(pill_y))
             .w(px(pill_w))
-            .h(px(ROW_H))
-            .rounded(px(6.0))
+            .h(z(ROW_H))
+            .rounded(z(6.0))
             .bg(rgb(0x232327))
             .opacity(self.pill_alpha);
         let rows = Category::ALL.chunks(3).map(|row| {
-            h_flex().gap(px(COL_GAP)).children(row.iter().map(|&c| {
+            h_flex().gap(z(COL_GAP)).children(row.iter().map(|&c| {
                 h_flex()
                     .id(c.name())
                     .flex_1()
-                    .h(px(ROW_H))
+                    .h(z(ROW_H))
                     .px_1p5()
                     .gap_2()
-                    .rounded(px(6.0))
+                    .rounded(z(6.0))
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         if this.phase != Phase::Idle || this.autoplay {
                             return;
@@ -1780,7 +1784,7 @@ impl Render for Card {
                     .child(div().flex_1().text_color(rgb(FG)).child(c.name()))
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(z(12.0))
                             .text_color(rgb(MUTED))
                             .child(gb(self.shown[c as usize])),
                     )
@@ -1788,7 +1792,7 @@ impl Render for Card {
         });
         let legend = v_flex()
             .relative()
-            .gap(px(ROW_GAP))
+            .gap(z(ROW_GAP))
             .child(pill)
             .child(
                 canvas(
@@ -1824,7 +1828,7 @@ impl Render for Card {
             .size_full()
             .bg(rgb(BG))
             .text_color(rgb(FG))
-            .text_size(px(13.0))
+            .text_size(z(13.0))
             .px_5()
             .pt_5()
             .pb_3()

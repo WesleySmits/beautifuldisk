@@ -9,6 +9,7 @@ use gpui_kit::{Bounds, Pixels, Point, Window, fill, point, px, size};
 
 use crate::files::Thumb;
 use crate::treemap::CELL;
+use crate::ui::{s, snap};
 
 const DOT: f32 = 3.0;
 const RADIUS: f32 = 7.0;
@@ -59,6 +60,7 @@ pub fn paint(
     time: f32,
     window: &mut Window,
 ) {
+    let (cell, dot_size) = (snap(CELL), snap(DOT));
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     if w < 2.0 || h < 2.0 {
         return;
@@ -78,7 +80,7 @@ pub fn paint(
     };
     window.paint_quad(
         fill(bounds, hsla(bg))
-            .corner_radii(px(RADIUS.min(w / 2.0).min(h / 2.0)))
+            .corner_radii(px(s(RADIUS).min(w / 2.0).min(h / 2.0)))
             .border_widths(px(1.0))
             .border_color(hsla(border)),
     );
@@ -88,17 +90,17 @@ pub fn paint(
         f32::from(bounds.origin.x - grid.x),
         f32::from(bounds.origin.y - grid.y),
     );
-    let first_col = ((gx + 2.0) / CELL).ceil() as i32;
-    let last_col = ((gx + w - 2.0 - DOT) / CELL).floor() as i32;
-    let first_row = ((gy + 2.0) / CELL).ceil() as i32;
-    let last_row = ((gy + h - 2.0 - DOT) / CELL).floor() as i32;
+    let first_col = ((gx + s(2.0)) / cell).ceil() as i32;
+    let last_col = ((gx + w - s(2.0) - dot_size) / cell).floor() as i32;
+    let first_row = ((gy + s(2.0)) / cell).ceil() as i32;
+    let last_row = ((gy + h - s(2.0) - dot_size) / cell).floor() as i32;
     let flicker = (time * 14.0) as i32;
     // With no picture to develop into (Linux, or one that failed to load),
     // the dots only thicken, or the tile would turn into a flat block.
     let develop = tile.develop.clamp(0.0, 1.0) * if thumb.is_some() { 1.0 } else { 0.4 };
-    let dot = DOT + (CELL - DOT) * develop;
+    let dot = dot_size + (cell - dot_size) * develop;
     for row in first_row..=last_row {
-        let v = ((row as f32 * CELL - gy) / h).clamp(0.0, 1.0);
+        let v = ((row as f32 * cell - gy) / h).clamp(0.0, 1.0);
         if v < 1.0 - tile.reveal {
             continue;
         }
@@ -106,7 +108,7 @@ pub fn paint(
             if hash01(col, row) < tile.dissolve {
                 continue;
             }
-            let u = ((col as f32 * CELL - gx) / w).clamp(0.0, 1.0);
+            let u = ((col as f32 * cell - gx) / w).clamp(0.0, 1.0);
             let real = thumb.map(|t| t.at(u, v, aspect));
             // Brighter parts of the picture get more dots. Without one, the
             // dots thicken toward the bottom like the cache tiles.
@@ -116,9 +118,9 @@ pub fn paint(
                 }
                 None => 0.1 + 0.82 * v.powf(1.3) * (0.6 + 0.4 * u),
             };
-            let near = tile
-                .band
-                .map_or(0.0, |x| (-((col as f32 * CELL - x) / 28.0).powi(2)).exp());
+            let near = tile.band.map_or(0.0, |x| {
+                (-((col as f32 * cell - x) / s(28.0)).powi(2)).exp()
+            });
             let mut density = if tile.on {
                 light * (0.55 + 0.45 * glow)
             } else {
@@ -142,7 +144,7 @@ pub fn paint(
             };
             let picture = real.map_or(dots, |[r, g, b]| Rgba { r, g, b, a: 255 });
             let color = mix(mix(dots, picture, develop), Rgba::WHITE, near * 0.7);
-            let at = grid + point(px(col as f32 * CELL), px(row as f32 * CELL));
+            let at = grid + point(px(col as f32 * cell), px(row as f32 * cell));
             window.paint_quad(fill(Bounds::new(at, size(px(dot), px(dot))), hsla(color)));
         }
     }

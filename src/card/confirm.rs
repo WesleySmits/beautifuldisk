@@ -7,6 +7,7 @@ use gpui_kit::*;
 
 use super::scroll::Scroll;
 use super::{BG, Card, FG, LINE, MUTED, Phase, gb, tilde};
+use crate::ui::z;
 
 impl Card {
     /// Asks before clearing the items `pick` says, from the treemap or the
@@ -52,11 +53,11 @@ impl Card {
                         .child(
                             div()
                                 .font_family("Menlo")
-                                .text_size(px(11.5))
+                                .text_size(z(12.0))
                                 .text_color(rgb(FG))
                                 .child(tilde(&t.what)),
                         )
-                        .child(div().text_size(px(11.5)).text_color(muted).child(t.how))
+                        .child(div().text_size(z(12.0)).text_color(muted).child(t.how))
                 });
                 v_flex()
                     .gap_2()
@@ -66,7 +67,7 @@ impl Card {
                     .child(
                         h_flex()
                             .gap_2()
-                            .children(item.icon.clone().map(|icon| img(icon).size(px(16.0))))
+                            .children(item.icon.clone().map(|icon| img(icon).size(z(16.0))))
                             .child(
                                 div()
                                     .flex_1()
@@ -75,18 +76,18 @@ impl Card {
                             )
                             .child(div().text_color(muted).child(gb(self.item_shown[i]))),
                     )
-                    .child(v_flex().gap_2().pl(px(24.0)).children(targets))
+                    .child(v_flex().gap_2().pl(z(24.0)).children(targets))
                     .into_any_element()
             })
             .collect();
 
         let panel = v_flex()
             .w_full()
-            .max_w(px(640.0))
+            .max_w(z(640.0))
             .max_h_full()
             .p_5()
             .gap_3()
-            .rounded(px(12.0))
+            .rounded(z(12.0))
             .border_1()
             .border_color(rgb(LINE))
             .bg(rgb(0x1c1c1f))
@@ -95,7 +96,7 @@ impl Card {
                     .gap_1()
                     .child(
                         div()
-                            .text_size(px(20.0))
+                            .text_size(z(20.0))
                             .font_weight(FontWeight::MEDIUM)
                             .child(format!("Clear {}?", gb(total))),
                     )

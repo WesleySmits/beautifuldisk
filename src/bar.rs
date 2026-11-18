@@ -5,6 +5,8 @@ use dither_gpui::dither_core::{Rgba, Tone};
 use dither_gpui::hsla;
 use gpui_kit::{Bounds, Corners, Pixels, Window, fill, point, px, size};
 
+use crate::ui::{s, snap, z};
+
 /// Spacing of the dither grid and the size of each dot, in points.
 const CELL: f32 = 5.0;
 const DOT: f32 = 3.0;
@@ -48,24 +50,28 @@ fn alpha(c: Rgba, a: f32) -> Rgba {
 }
 
 pub fn paint(bar: &Bar, bounds: Bounds<Pixels>, window: &mut Window) {
+    let (cell, dot_size) = (snap(CELL), snap(DOT));
     let w = f32::from(bounds.size.width);
     let h = f32::from(bounds.size.height);
     let origin = bounds.origin;
-    let cols = (w / CELL).floor() as i32;
-    let rows = (h / CELL).floor() as i32;
-    let ox = (w - cols as f32 * CELL) / 2.0 + (CELL - DOT) / 2.0;
-    let oy = (h - rows as f32 * CELL) / 2.0 + (CELL - DOT) / 2.0;
+    let cols = (w / cell).floor() as i32;
+    let rows = (h / cell).floor() as i32;
+    let ox = (w - cols as f32 * cell) / 2.0 + (cell - dot_size) / 2.0;
+    let oy = (h - rows as f32 * cell) / 2.0 + (cell - dot_size) / 2.0;
     let dot = |window: &mut Window, col: i32, row: i32, color: Rgba| {
         let at = point(
-            origin.x + px(ox + col as f32 * CELL),
-            origin.y + px(oy + row as f32 * CELL),
+            origin.x + px(ox + col as f32 * cell),
+            origin.y + px(oy + row as f32 * cell),
         );
-        window.paint_quad(fill(Bounds::new(at, size(px(DOT), px(DOT))), hsla(color)));
+        window.paint_quad(fill(
+            Bounds::new(at, size(px(dot_size), px(dot_size))),
+            hsla(color),
+        ));
     };
 
     window.paint_quad(
         fill(bounds, hsla(Rgba::hex(0x1b1b1e)))
-            .corner_radii(px(RADIUS))
+            .corner_radii(z(RADIUS))
             .border_widths(px(1.0))
             .border_color(hsla(alpha(Rgba::WHITE, 0.06))),
     );
@@ -74,7 +80,7 @@ pub fn paint(bar: &Bar, bounds: Bounds<Pixels>, window: &mut Window) {
     let used_end = bar.segments.last().map_or(0.0, |s| s.end) * w;
     let faint = alpha(Rgba::WHITE, 0.045);
     for col in 0..cols {
-        if ox + col as f32 * CELL + DOT / 2.0 < used_end {
+        if ox + col as f32 * cell + dot_size / 2.0 < used_end {
             continue;
         }
         for row in 0..rows {
@@ -92,7 +98,7 @@ pub fn paint(bar: &Bar, bounds: Bounds<Pixels>, window: &mut Window) {
         let glow = seg.glow;
         let base = seg.tone.base();
         let first = i == 0;
-        let radius = |on: bool| px(if on { RADIUS } else { 1.5 });
+        let radius = |on: bool| px(if on { s(RADIUS) } else { s(1.5) });
         window.paint_quad(
             fill(
                 Bounds::new(
@@ -117,12 +123,12 @@ pub fn paint(bar: &Bar, bounds: Bounds<Pixels>, window: &mut Window) {
             0.0
         };
         for col in 0..cols {
-            let cx = ox + col as f32 * CELL + DOT / 2.0;
+            let cx = ox + col as f32 * cell + dot_size / 2.0;
             if cx < x0 + 1.0 || cx > x1 - 1.0 {
                 continue;
             }
             // 1 at the segment's right edge, fading to 0 EDGE_CELLS inside it.
-            let near = (1.0 - (x1 - cx) / (CELL * EDGE_CELLS)).max(0.0) * edge;
+            let near = (1.0 - (x1 - cx) / (cell * EDGE_CELLS)).max(0.0) * edge;
             for row in 0..rows {
                 let fy = row as f32 / (rows - 1).max(1) as f32;
                 let density =
@@ -142,7 +148,7 @@ pub fn paint(bar: &Bar, bounds: Bounds<Pixels>, window: &mut Window) {
 
         // Bloom spilling past the leading edge.
         if edge > 0.01 {
-            let first_col = ((x1 - ox) / CELL).ceil() as i32;
+            let first_col = ((x1 - ox) / cell).ceil() as i32;
             for k in 0..3 {
                 let col = first_col + k;
                 if col >= cols {
@@ -167,7 +173,7 @@ pub fn paint_particles(
 ) {
     for p in particles {
         let t = (p.life / p.max_life).clamp(0.0, 1.0);
-        let side = 1.5 + 1.5 * t;
+        let side = s(1.5 + 1.5 * t);
         let at = origin + point(px(p.x - side / 2.0), px(p.y - side / 2.0));
         window.paint_quad(fill(
             Bounds::new(at, size(px(side), px(side))),

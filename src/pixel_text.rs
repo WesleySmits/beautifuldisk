@@ -6,6 +6,8 @@ use dither_gpui::dither_core::dither::hash01;
 use dither_gpui::hsla;
 use gpui_kit::{Bounds, IntoElement, Pixels, Styled, Window, canvas, fill, point, px, size};
 
+use crate::ui::{s, z};
+
 /// Spacing of the dot grid in points: as small as the path's old Menlo text.
 const CELL: f32 = 1.25;
 /// Glyphs are 5 columns of 7 dots above the baseline and 1 below, with a
@@ -133,7 +135,7 @@ pub fn status(label: &'static str, path: String, time: f32, muted: u32) -> impl 
     )
     .flex_1()
     .min_w_0()
-    .h(px(ROWS as f32 * CELL))
+    .h(z(ROWS as f32 * CELL))
 }
 
 fn paint(
@@ -144,8 +146,9 @@ fn paint(
     bounds: Bounds<Pixels>,
     window: &mut Window,
 ) {
-    let fits = (f32::from(bounds.size.width) / CELL) as usize;
-    let dot = px(0.75);
+    let cell = s(CELL);
+    let fits = (f32::from(bounds.size.width) / cell) as usize;
+    let dot = z(0.75);
     // The band crosses the whole row at one speed, so long paths don't make
     // it rush, then waits off the end a moment before the next pass.
     let span = fits as f32 + 60.0;
@@ -188,8 +191,8 @@ fn paint(
                         a: (light * 255.0) as u8,
                     };
                     let at = point(
-                        bounds.origin.x + px(x as f32 * CELL),
-                        bounds.origin.y + px(y as f32 * CELL),
+                        bounds.origin.x + px(x as f32 * cell),
+                        bounds.origin.y + px(y as f32 * cell),
                     );
                     window.paint_quad(fill(Bounds::new(at, size(dot, dot)), hsla(lit)));
                 }

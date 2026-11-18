@@ -11,6 +11,7 @@ use super::docker_panel::{count, size};
 use super::{FG, LINE, MUTED, OK, gb, tilde};
 use crate::clutter::Item;
 use crate::docker::Builds;
+use crate::ui::z;
 
 /// Rows shown before the rest are counted.
 const ROWS: usize = 6;
@@ -185,15 +186,15 @@ impl Render for Tip {
         // the gap to the cursor inside it.
         div().p_2().font_family(crate::FONT).child(
             v_flex()
-                .w(px(380.0))
+                .w(z(380.0))
                 .p_3()
                 .gap_2()
-                .rounded(px(12.0))
+                .rounded(z(12.0))
                 .border_1()
                 .border_color(rgb(LINE))
                 .bg(rgb(0x1c1c1f))
                 .shadow_lg()
-                .text_size(px(12.0))
+                .text_size(z(12.0))
                 .child(
                     h_flex()
                         .gap_2()
@@ -201,14 +202,14 @@ impl Render for Tip {
                         .children(
                             self.icon
                                 .clone()
-                                .map(|icon| img(icon).size(px(16.0)).flex_none()),
+                                .map(|icon| img(icon).size(z(16.0)).flex_none()),
                         )
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(13.0))
+                                .text_size(z(13.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(rgb(FG))
                                 .child(self.title.clone()),

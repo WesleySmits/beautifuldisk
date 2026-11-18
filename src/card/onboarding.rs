@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::access::{self, Folder};
+use crate::ui::z;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Ask {
@@ -124,12 +125,12 @@ fn chip() -> Div {
     h_flex()
         .gap_1p5()
         .px_2()
-        .h(px(24.0))
-        .rounded(px(6.0))
+        .h(z(24.0))
+        .rounded(z(6.0))
         .bg(rgb(0x232327))
         .border_1()
         .border_color(rgb(LINE))
-        .text_size(px(12.0))
+        .text_size(z(12.0))
 }
 
 impl Card {
@@ -264,7 +265,7 @@ impl Card {
                     let options = WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                             point(px(0.0), px(0.0)),
-                            size(px(400.0), px(84.0)),
+                            size(z(400.0), z(84.0)),
                         ))),
                         titlebar: None,
                         focus: false,
@@ -334,7 +335,7 @@ impl Card {
             div()
                 .id(("access", row))
                 .relative()
-                .h(px(64.0))
+                .h(z(64.0))
                 .w_full()
                 .cursor_pointer()
                 .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -377,7 +378,7 @@ impl Card {
                                 .child(
                                     div()
                                         .truncate()
-                                        .text_size(px(12.0))
+                                        .text_size(z(12.0))
                                         .text_color(muted)
                                         .child(DETAILS[row]),
                                 ),
@@ -391,7 +392,7 @@ impl Card {
             .size_full()
             .bg(rgb(BG))
             .text_color(rgb(FG))
-            .text_size(px(13.0))
+            .text_size(z(13.0))
             .px_5()
             .pt_5()
             .pb_3()
@@ -401,7 +402,7 @@ impl Card {
                     .gap_1()
                     .child(
                         div()
-                            .text_size(px(26.0))
+                            .text_size(z(26.0))
                             .font_weight(FontWeight::MEDIUM)
                             .child("Choose what to scan"),
                     )
@@ -411,12 +412,12 @@ impl Card {
                             .child("macOS asks once for each folder you pick."),
                     ),
             )
-            .child(v_flex().gap(px(treemap::GAP)).children(rows))
+            .child(v_flex().gap(z(treemap::GAP)).children(rows))
             .child(div().flex_1())
             .child(div().flex_none().h(px(1.0)).bg(rgb(LINE)))
             .child(
                 h_flex()
-                    .h(px(30.0))
+                    .h(z(30.0))
                     .justify_between()
                     .child(
                         div()
@@ -483,8 +484,8 @@ impl Render for Helper {
             .font_family(crate::FONT)
             .bg(rgb(BG))
             .text_color(rgb(FG))
-            .text_size(px(13.0))
-            .p(px(6.0))
+            .text_size(z(13.0))
+            .p(z(6.0))
             .child(
                 div()
                     .relative()
@@ -518,7 +519,7 @@ impl Render for Helper {
                                     )
                                     .child(
                                         div()
-                                            .text_size(px(12.0))
+                                            .text_size(z(12.0))
                                             .text_color(rgb(MUTED))
                                             .child("Then switch it on."),
                                     ),
@@ -531,7 +532,7 @@ impl Render for Helper {
                                     .on_mouse_down(MouseButton::Left, |_, _, _| {
                                         crate::grant::drag_app()
                                     })
-                                    .child(img(self.icon.clone()).size(px(52.0))),
+                                    .child(img(self.icon.clone()).size(z(52.0))),
                             ),
                     ),
             )

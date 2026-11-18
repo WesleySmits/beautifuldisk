@@ -27,6 +27,7 @@ use crate::bar::{self, Particle};
 use crate::files::{self, Entry, Found, Kind, SHOWN, Search};
 use crate::mosaic;
 use crate::treemap::{self, Rect};
+use crate::ui::{s, snap, z};
 
 /// How long the band of light takes to cross while files go to the Trash.
 const SWEEP: f32 = 1.1;
@@ -142,9 +143,9 @@ fn months_old(modified: SystemTime) -> String {
 
 fn check(on: bool) -> Div {
     div()
-        .size(px(15.0))
+        .size(z(15.0))
         .flex_none()
-        .rounded(px(4.0))
+        .rounded(z(4.0))
         .border_1()
         .flex()
         .items_center()
@@ -153,7 +154,7 @@ fn check(on: bool) -> Div {
             c.bg(rgb(FG)).border_color(rgb(FG)).child(
                 svg()
                     .path(IconName::Check.path())
-                    .size(px(11.0))
+                    .size(z(11.0))
                     .text_color(rgb(BG)),
             )
         })
@@ -554,7 +555,7 @@ impl Card {
     pub(super) fn files_area(&self, cx: &mut Context<Self>) -> AnyElement {
         let f = &self.files;
         let bounds = f.bounds.clone();
-        let frame = div().relative().flex_1().min_h(px(160.0)).w_full().child(
+        let frame = div().relative().flex_1().min_h(z(160.0)).w_full().child(
             canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
                 .absolute()
                 .size_full(),
@@ -648,7 +649,7 @@ impl Card {
             }
             let label = if more {
                 Some(format!("{} more", members.len()))
-            } else if r.w >= 70.0 && r.h >= 40.0 {
+            } else if r.w >= s(70.0) && r.h >= s(40.0) {
                 Some(bytes_text(first.bytes))
             } else {
                 None
@@ -665,7 +666,7 @@ impl Card {
                     .top(px(r.y))
                     .w(px(r.w))
                     .h(px(r.h))
-                    .p(px(6.0))
+                    .p(z(6.0))
                     .flex()
                     .flex_col()
                     .justify_end()
@@ -705,12 +706,12 @@ impl Card {
                     .children(label.map(|label| {
                         div()
                             .px_1()
-                            .rounded(px(4.0))
+                            .rounded(z(4.0))
                             .bg(rgba(BG << 8 | 0xb0))
                             .whitespace_nowrap()
                             .font_family("Menlo")
                             .font_weight(FontWeight::BOLD)
-                            .text_size(px(11.0))
+                            .text_size(z(12.0))
                             .text_color(rgb(FG))
                             .child(label)
                     })),
@@ -831,7 +832,7 @@ impl Card {
                 .child(
                     h_flex()
                         .gap_2()
-                        .text_size(px(12.0))
+                        .text_size(z(12.0))
                         .child(div().flex_none().text_color(rgb(color)).child(status))
                         .child(
                             div()
@@ -962,10 +963,10 @@ fn layout(f: &FilesView, area: Size<Pixels>) -> Vec<Rect> {
 
 fn inset(r: Rect) -> Rect {
     Rect {
-        x: r.x + treemap::GAP / 2.0,
-        y: r.y + treemap::GAP / 2.0,
-        w: (r.w - treemap::GAP).max(0.0),
-        h: (r.h - treemap::GAP).max(0.0),
+        x: r.x + s(treemap::GAP) / 2.0,
+        y: r.y + s(treemap::GAP) / 2.0,
+        w: (r.w - s(treemap::GAP)).max(0.0),
+        h: (r.h - s(treemap::GAP)).max(0.0),
     }
 }
 
@@ -978,11 +979,11 @@ fn band_x(t: f32, width: f32) -> f32 {
 /// they are checked. Dots behind it with a twin turn purple.
 fn paint_search(search: Option<&Search>, bounds: Bounds<Pixels>, time: f32, window: &mut Window) {
     use dither_gpui::dither_core::Rgba;
-    const PITCH: f32 = 8.0;
+    let pitch = snap(8.0);
     let Some(search) = search else { return };
     let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
-    let cols = (w / PITCH) as i32;
-    let rows = (h / PITCH) as i32;
+    let cols = (w / pitch) as i32;
+    let rows = (h / pitch) as i32;
     let total = search.total.load(Relaxed).max(1) as f32;
     let checked = search.checked.load(Relaxed) as f32;
     let share = if search.total.load(Relaxed) == 0 {
@@ -1017,10 +1018,11 @@ fn paint_search(search: Option<&Search>, bounds: Bounds<Pixels>, time: f32, wind
                 let a = 0.5 + 0.2 * ((time * 2.0 + (col + row) as f32 * 0.3).sin());
                 (Rgba::hex(0x3a3a40).with_alpha((a * 255.0) as u8), 3.0)
             };
+            let dot = snap(dot);
             let at = bounds.origin
                 + point(
-                    px(col as f32 * PITCH + (4.0 - dot) / 2.0),
-                    px(row as f32 * PITCH + (4.0 - dot) / 2.0),
+                    px(col as f32 * pitch + (s(4.0) - dot) / 2.0),
+                    px(row as f32 * pitch + (s(4.0) - dot) / 2.0),
                 );
             window.paint_quad(fill(
                 Bounds::new(at, size(px(dot), px(dot))),

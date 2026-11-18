@@ -18,6 +18,7 @@ use super::tip::Tip;
 use super::{BG, Card, FG, LINE, MUTED, Phase, WARN};
 use crate::docker::{self, Chosen, Docker, State};
 use crate::icons::{self, Logo, Source};
+use crate::ui::z;
 
 pub(super) struct DockerPanel {
     bin: PathBuf,
@@ -275,11 +276,11 @@ impl Card {
                 panel
                     .icon
                     .clone()
-                    .map(|icon| img(icon).size(px(22.0)).flex_none()),
+                    .map(|icon| img(icon).size(z(22.0)).flex_none()),
             )
             .child(
                 div()
-                    .text_size(px(20.0))
+                    .text_size(z(20.0))
                     .font_weight(FontWeight::MEDIUM)
                     .child("Docker"),
             )
@@ -381,11 +382,11 @@ impl Card {
 
         let card = v_flex()
             .w_full()
-            .max_w(px(640.0))
+            .max_w(z(640.0))
             .max_h_full()
             .p_5()
             .gap_3()
-            .rounded(px(12.0))
+            .rounded(z(12.0))
             .border_1()
             .border_color(rgb(LINE))
             .bg(rgb(0x1c1c1f))
@@ -459,14 +460,14 @@ impl Card {
             if let Some(warning) = warning {
                 rows.push(
                     h_flex()
-                        .pl(px(25.0))
+                        .pl(z(25.0))
                         .pt_3()
                         .pb_3()
                         .gap_3()
                         .child(
                             div()
                                 .flex_1()
-                                .text_size(px(12.0))
+                                .text_size(z(12.0))
                                 .text_color(rgb(WARN))
                                 .child(warning),
                         )
@@ -597,7 +598,7 @@ impl Card {
                 .rounded_full()
                 .border_1()
                 .border_color(rgb(0x4a3a1a))
-                .text_size(px(11.0))
+                .text_size(z(12.0))
                 .text_color(rgb(WARN))
                 .child("Gone for good");
             rows.push(
@@ -648,10 +649,10 @@ impl Card {
         let dialog =
             v_flex()
                 .w_full()
-                .max_w(px(520.0))
+                .max_w(z(520.0))
                 .p_5()
                 .gap_3()
-                .rounded(px(12.0))
+                .rounded(z(12.0))
                 .border_1()
                 .border_color(rgb(LINE))
                 .bg(rgb(0x1c1c1f))
@@ -660,7 +661,7 @@ impl Card {
                         .gap_1()
                         .child(
                             div()
-                                .text_size(px(20.0))
+                                .text_size(z(20.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .child("Keep Docker logs small?"),
                         )
@@ -730,7 +731,7 @@ fn heading(text: String, color: Rgba) -> AnyElement {
         .pb_1()
         .border_b_1()
         .border_color(rgb(LINE))
-        .text_size(px(12.0))
+        .text_size(z(12.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(color)
         .child(text)
@@ -751,9 +752,9 @@ fn row(
     toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     let check = div()
-        .size(px(15.0))
+        .size(z(15.0))
         .flex_none()
-        .rounded(px(4.0))
+        .rounded(z(4.0))
         .border_1()
         .flex()
         .items_center()
@@ -762,7 +763,7 @@ fn row(
             c.bg(rgb(FG)).border_color(rgb(FG)).child(
                 svg()
                     .path(IconName::Check.path())
-                    .size(px(11.0))
+                    .size(z(11.0))
                     .text_color(rgb(BG)),
             )
         })
@@ -792,7 +793,7 @@ fn row(
         .children(extra)
         .child(
             div()
-                .w(px(72.0))
+                .w(z(72.0))
                 .flex_none()
                 .text_right()
                 .font_family("Menlo")
@@ -804,15 +805,15 @@ fn row(
 /// A share of the largest row, red when it is most of it.
 fn bar(share: f32) -> AnyElement {
     div()
-        .w(px(96.0))
-        .h(px(5.0))
+        .w(z(96.0))
+        .h(z(5.0))
         .flex_none()
         .rounded_full()
         .bg(rgb(LINE))
         .child(
             div()
                 .h_full()
-                .w(px(96.0 * share.max(0.02)))
+                .w(z(96.0 * share.max(0.02)))
                 .rounded_full()
                 .bg(rgb(if share > 0.5 { 0xef7b5c } else { MUTED })),
         )
