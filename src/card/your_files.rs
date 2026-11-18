@@ -78,6 +78,9 @@ pub(super) struct FilesView {
     moved_bytes: u64,
     particles: Vec<Particle>,
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// `--autoplay`: when the tour of this tab began, and its next step.
+    tour_at: Option<f32>,
+    tour_step: usize,
 }
 
 impl FilesView {
@@ -299,6 +302,38 @@ impl Card {
             moving |= ease(&mut f.spare_dissolve, to, dt, 0.08);
         }
         moving
+    }
+
+    /// `--autoplay`, once the caches are cleared: this tab, one file's
+    /// copies side by side, the other copy kept instead, then everything
+    /// picked and moved to the Trash. Returns whether it is still playing.
+    pub(super) fn play_files(&mut self) -> bool {
+        const STEPS: [f32; 8] = [0.8, 2.0, 2.8, 4.6, 5.8, 7.0, 7.6, 8.6];
+        if self.files.found.is_none() {
+            return true;
+        }
+        let start = *self.files.tour_at.get_or_insert(self.time);
+        let t = self.time - start;
+        let step = self.files.tour_step;
+        let Some(&at) = STEPS.get(step) else {
+            return t < STEPS[STEPS.len() - 1] + 3.5;
+        };
+        if t < at {
+            return true;
+        }
+        self.files.tour_step += 1;
+        let f = &mut self.files;
+        match step {
+            0 => self.view = super::View::Files,
+            1 => f.hover = Some(0),
+            2 => self.open_entry(0),
+            3 => f.keep[0] = 1,
+            4 => f.picked[0] = true,
+            5 => f.open = None,
+            6 => f.picked.fill(true),
+            _ => self.trash_picked(),
+        }
+        true
     }
 
     pub(super) fn files_dismiss(&mut self) -> bool {

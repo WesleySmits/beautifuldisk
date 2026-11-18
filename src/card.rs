@@ -760,7 +760,7 @@ impl Card {
     }
 
     /// `--autoplay`: scans after a pause, hovers a few items once they are
-    /// in, then clears. Returns whether the script is still waiting to act.
+    /// in, clears, then tours "Your files". Returns whether the script is still waiting to act.
     fn play_script(&mut self, cx: &mut Context<Self>) -> bool {
         const HOVERS: [usize; 3] = [0, 3, 1];
         const HOLD: f32 = 0.6;
@@ -770,8 +770,11 @@ impl Card {
             }
             return true;
         }
-        if self.phase != Phase::Idle || self.items.is_none() || self.freed > 0 {
+        if self.phase != Phase::Idle || self.items.is_none() {
             return false;
+        }
+        if self.freed > 0 {
+            return self.play_files();
         }
         let t = self.time - self.items_at - 1.4;
         if t < 0.0 {
