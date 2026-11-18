@@ -25,16 +25,41 @@ const CHROMIUM_CACHES: &[&str] = &[
     "component_crx_cache",
     "extensions_crx_cache",
     "Crashpad/completed",
+    "Service Worker/CacheStorage",
+    "Service Worker/ScriptCache",
 ];
 
-/// Files a running Chromium or Electron app holds in its data folder.
-const LOCKS: &[&str] = &["SingletonLock", "code.lock"];
-
-/// Whether the app with data in `dir` is running.
+/// Whether the app with data in `dir` is running. A browser holds its lock
+/// in the folder above its profiles, as in google-chrome/Default.
 pub(super) fn locked(dir: &Path) -> bool {
-    LOCKS
-        .iter()
-        .any(|lock| fs::symlink_metadata(dir.join(lock)).is_ok())
+    dir.ancestors().take(3).any(|dir| {
+        chromium_running(&dir.join("SingletonLock"))
+            || fs::symlink_metadata(dir.join("code.lock")).is_ok()
+    })
+}
+
+/// Whether the Chromium that made this SingletonLock still runs. The lock
+/// is a link to "hostname-pid", and one left by a crash stays behind, as
+/// test browsers often do. One made under another hostname is stale too:
+/// a running app would have used this one.
+fn chromium_running(lock: &Path) -> bool {
+    let Ok(target) = fs::read_link(lock) else {
+        // A plain file, or none at all.
+        return lock.exists();
+    };
+    let target = target.to_string_lossy();
+    let Some((host, pid)) = target.rsplit_once('-') else {
+        return true;
+    };
+    let Ok(pid) = pid.parse::<libc::pid_t>() else {
+        return true;
+    };
+    let mut name = [0u8; 256];
+    let ours = unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } == 0
+        && std::ffi::CStr::from_bytes_until_nul(&name).is_ok_and(|n| n.to_string_lossy() == host);
+    // Signal 0 only asks whether the process exists.
+    ours && (unsafe { libc::kill(pid, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
 pub(super) fn find(home: &Path, roots: &[(PathBuf, Category)]) -> Vec<Found> {
@@ -48,10 +73,12 @@ pub(super) fn find(home: &Path, roots: &[(PathBuf, Category)]) -> Vec<Found> {
     let category = |path: &Path| category_of(roots, path);
 
     found.extend(electron(&support, category(&support)));
+    found.extend(test_profiles(&support, category(&support)));
     found.extend(agent_versions(home, roots));
 
     let contents = |paths: Vec<PathBuf>| {
-        let bytes = paths.iter().map(|p| dir_size(p)).sum();
+        let paths = sized(paths);
+        let bytes = paths.iter().map(|(_, b)| b).sum();
         (bytes, How::Contents(paths, Vec::new()))
     };
 
@@ -186,6 +213,17 @@ pub(super) fn find(home: &Path, roots: &[(PathBuf, Category)]) -> Vec<Found> {
     found
 }
 
+/// Each path with its size.
+fn sized(paths: Vec<PathBuf>) -> Vec<(PathBuf, u64)> {
+    paths
+        .into_iter()
+        .map(|p| {
+            let bytes = dir_size(&p);
+            (p, bytes)
+        })
+        .collect()
+}
+
 /// Subfolders of `dir`, or nothing if it can't be read.
 pub(super) fn children(dir: &Path) -> Vec<PathBuf> {
     fs::read_dir(dir).map_or(Vec::new(), |entries| {
@@ -197,36 +235,47 @@ pub(super) fn children(dir: &Path) -> Vec<PathBuf> {
     })
 }
 
-/// Chromium caches inside every Electron app's data folder.
+/// Chromium caches inside every browser's and Electron app's data folder:
+/// the folder itself, like discord, or a profile up to two levels down, like
+/// google-chrome/Default or BraveSoftware/Brave-Browser/Default.
 fn electron(support: &Path, category: Category) -> Vec<Found> {
     let mut apps = Vec::new();
     let mut names = Vec::new();
-    for dir in children(support) {
-        // Only folders that look like Chromium's, so a "Cache" folder of some
-        // other app is never mistaken for one.
-        let chromium = ["GPUCache", "Code Cache"]
-            .iter()
-            .any(|m| dir.join(m).is_dir());
-        if !chromium {
-            continue;
+    for app in children(support) {
+        let mut dirs = vec![app.clone()];
+        for child in children(&app) {
+            dirs.extend(children(&child));
+            dirs.push(child);
         }
-        let leaves: Vec<(PathBuf, u64)> = CHROMIUM_CACHES
-            .iter()
-            .map(|leaf| dir.join(leaf))
-            .filter(|p| p.is_dir())
-            .map(|p| {
-                let bytes = dir_size(&p);
-                (p, bytes)
-            })
-            .filter(|(_, b)| *b > 0)
-            .collect();
-        if leaves.is_empty() {
-            continue;
+        let mut found = false;
+        for dir in dirs {
+            // Only folders that look like Chromium's, so a "Cache" folder of
+            // some other app is never mistaken for one. Test browser profiles
+            // are their own item.
+            let chromium = ["GPUCache", "Code Cache", "GrShaderCache"]
+                .iter()
+                .any(|m| dir.join(m).is_dir());
+            if !chromium || dir.ancestors().any(scoped) {
+                continue;
+            }
+            let leaves: Vec<(PathBuf, u64)> = CHROMIUM_CACHES
+                .iter()
+                .map(|leaf| dir.join(leaf))
+                .filter(|p| p.is_dir())
+                .map(|p| {
+                    let bytes = dir_size(&p);
+                    (p, bytes)
+                })
+                .filter(|(_, b)| *b > 0)
+                .collect();
+            if !leaves.is_empty() {
+                apps.push((dir, leaves));
+                found = true;
+            }
         }
-        if let Some(name) = dir.file_name() {
+        if found && let Some(name) = app.file_name() {
             names.push(name.to_string_lossy().into_owned());
         }
-        apps.push((dir, leaves));
     }
     let bytes = apps
         .iter()
@@ -242,7 +291,7 @@ fn electron(support: &Path, category: Category) -> Vec<Found> {
         ),
     };
     vec![Found {
-        name: "Electron app caches".into(),
+        name: "Browser and app caches".into(),
         detail,
         hue: 195.0,
         icon: Source::File,
@@ -252,6 +301,49 @@ fn electron(support: &Path, category: Category) -> Vec<Found> {
         bytes,
         how: How::Unlocked(apps),
     }]
+}
+
+/// Whether `dir` is a profile ChromeDriver made for one test run.
+fn scoped(dir: &Path) -> bool {
+    dir.file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("scoped_dir"))
+}
+
+/// Whole browser profiles ChromeDriver and Selenium made for test runs and
+/// left behind, as in google-chrome-headless/scoped_dirAbc123. Ones used in
+/// the last two days may belong to a test still running.
+fn test_profiles(support: &Path, category: Category) -> Vec<Found> {
+    let profiles: Vec<(PathBuf, u64)> = children(support)
+        .iter()
+        .flat_map(|app| children(app))
+        .filter(|p| scoped(p) && !locked(p) && !recent(p))
+        .map(|p| {
+            let bytes = dir_size(&p);
+            (p, bytes)
+        })
+        .collect();
+    vec![Found {
+        name: "Test browser profiles".into(),
+        detail: format!(
+            "{} left by browser tests.",
+            count(profiles.len(), "profile", "profiles")
+        ),
+        hue: 150.0,
+        icon: Source::File,
+        icon_file: None,
+        category,
+        pick: Pick::Dev,
+        bytes: profiles.iter().map(|(_, b)| b).sum(),
+        how: How::Paths(profiles),
+    }]
+}
+
+fn recent(dir: &Path) -> bool {
+    fs::metadata(dir)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_none_or(|age| age < super::RECENT)
 }
 
 /// Coding agents that keep every version they updated to. The one in use
@@ -347,11 +439,19 @@ fn containers(home: &Path) -> Vec<Found> {
                 .is_some_and(|n| super::protected_cache(&n.to_string_lossy()))
         })
         .collect();
-    let bytes = caches
-        .iter()
-        .map(|c| dir_size(c))
-        .sum::<u64>()
-        .saturating_sub(skip.iter().map(|s| dir_size(s)).sum());
+    let caches: Vec<(PathBuf, u64)> = caches
+        .into_iter()
+        .map(|c| {
+            let kept: u64 = skip
+                .iter()
+                .filter(|s| s.starts_with(&c))
+                .map(|s| dir_size(s))
+                .sum();
+            let bytes = dir_size(&c).saturating_sub(kept);
+            (c, bytes)
+        })
+        .collect();
+    let bytes = caches.iter().map(|(_, b)| b).sum();
     vec![Found {
         name: "Sandboxed app caches".into(),
         detail: "Caches App Store apps keep in their own folders.".into(),
@@ -377,7 +477,8 @@ fn sandboxed(home: &Path, roots: &[(PathBuf, Category)]) -> Vec<Found> {
         )
         .filter(|c| c.is_dir())
         .collect();
-    let bytes = caches.iter().map(|c| dir_size(c)).sum();
+    let caches = sized(caches);
+    let bytes = caches.iter().map(|(_, b)| b).sum();
     vec![Found {
         name: "Flatpak and Snap caches".into(),
         detail: "Caches of apps from Flatpak and Snap.".into(),

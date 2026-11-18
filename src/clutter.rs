@@ -57,10 +57,10 @@ pub enum Pick {
 
 enum How {
     /// Empty these folders, keeping the folders. Skips the listed children.
-    Contents(Vec<PathBuf>, Vec<PathBuf>),
-    /// Files in these folders not changed for this long. Skips the listed
-    /// children.
-    Old(Vec<(PathBuf, Duration)>, Vec<PathBuf>),
+    Contents(Vec<(PathBuf, u64)>, Vec<PathBuf>),
+    /// Files in these folders not changed for this long, and what they come
+    /// to. Skips the listed children.
+    Old(Vec<(PathBuf, Duration, u64)>, Vec<PathBuf>),
     /// Delete these folders or files outright.
     Paths(Vec<(PathBuf, u64)>),
     /// Per app data folder, caches to delete unless the app is running.
@@ -87,7 +87,8 @@ impl Item {
         self.left.load(Relaxed)
     }
 
-    /// Exactly what clearing this item touches, for the confirmation.
+    /// Exactly what clearing this item touches, for the confirmation,
+    /// largest first. A long tail of small lines shares one.
     pub fn targets(&self) -> Vec<Target> {
         let mut targets = self.how_targets();
         if let Some(app) = self.app {
@@ -95,80 +96,131 @@ impl Item {
                 t.how = format!("{}, unless {} is open", t.how, app.name);
             }
         }
+        targets.sort_by_key(|t| std::cmp::Reverse(t.bytes));
+        if targets.len() <= 8 {
+            return targets;
+        }
+        let Some(small) = targets.iter().position(|t| t.bytes < SMALL) else {
+            return targets;
+        };
+        let rest = targets.split_off(small);
+        let first = &rest[0];
+        let parent = Path::new(&first.what).parent();
+        let shared = parent.filter(|p| rest.iter().all(|t| Path::new(&t.what).starts_with(p)));
+        targets.push(Target {
+            what: match shared {
+                Some(parent) => format!("{} more in {}", rest.len(), parent.display()),
+                None => format!("{} more", rest.len()),
+            },
+            how: if rest.iter().all(|t| t.how == first.how) {
+                format!("Each under 10 MB. {}", first.how)
+            } else {
+                "Each under 10 MB".into()
+            },
+            bytes: rest.iter().map(|t| t.bytes).sum(),
+            paths: rest.into_iter().flat_map(|t| t.paths).collect(),
+        });
         targets
     }
 
     fn how_targets(&self) -> Vec<Target> {
-        let each = |list: &[(PathBuf, u64)], how: &'static str| {
+        let one = |what: String, how: String, bytes: u64, paths: Vec<PathBuf>| Target {
+            what,
+            how,
+            bytes,
+            paths,
+        };
+        let each = |list: &[(PathBuf, u64)], how: &str| {
             list.iter()
-                .map(|(p, _)| Target {
-                    what: p.display().to_string(),
-                    how: how.into(),
-                })
+                .map(|(p, b)| one(p.display().to_string(), how.into(), *b, vec![p.clone()]))
                 .collect()
         };
         match &self.how {
             How::Contents(dirs, skip) => dirs
                 .iter()
-                .filter(|d| d.is_dir())
-                .map(|d| {
+                .filter(|(d, _)| d.is_dir())
+                .map(|(d, b)| {
                     let kept = skip.iter().filter(|s| s.starts_with(d)).count();
-                    Target {
-                        what: d.display().to_string(),
-                        how: match kept {
-                            0 => "Everything inside".into(),
-                            1 => "Everything inside but 1 folder listed elsewhere".into(),
-                            n => format!("Everything inside but {n} folders listed elsewhere"),
-                        },
-                    }
+                    let how = match kept {
+                        0 => "Everything inside".into(),
+                        1 => "Everything inside but 1 folder listed elsewhere".into(),
+                        n => format!("Everything inside but {n} folders listed elsewhere"),
+                    };
+                    one(d.display().to_string(), how, *b, vec![d.clone()])
                 })
                 .collect(),
             How::Old(dirs, _) => dirs
                 .iter()
-                .filter(|(d, _)| d.is_dir())
-                .map(|(d, age)| Target {
-                    what: d.display().to_string(),
-                    how: format!("Files older than {} days", age.as_secs() / 86_400),
+                .filter(|(d, _, _)| d.is_dir())
+                .map(|(d, age, b)| {
+                    let how = format!("Files older than {} days", age.as_secs() / 86_400);
+                    one(d.display().to_string(), how, *b, vec![d.clone()])
                 })
                 .collect(),
             How::Paths(list) => each(list, "Deleted"),
             How::Unlocked(apps) => apps
                 .iter()
-                .flat_map(|(_, leaves)| each(leaves, "Deleted unless the app is open"))
+                .map(|(dir, leaves)| {
+                    let names: Vec<String> = leaves
+                        .iter()
+                        .filter_map(|(p, _)| p.strip_prefix(dir).ok())
+                        .map(|p| p.display().to_string())
+                        .collect();
+                    one(
+                        dir.display().to_string(),
+                        format!("{}, unless the app is open", names.join(", ")),
+                        leaves.iter().map(|(_, b)| b).sum(),
+                        leaves.iter().map(|(p, _)| p.clone()).collect(),
+                    )
+                })
                 .collect(),
             How::Worktrees(list) => each(list, "Removed with git worktree remove"),
             How::Simulators(list) => each(list, "Deleted with simctl unless running"),
             How::Emulators(list) => each(list, "Deleted with its .ini unless running"),
-            How::Run(program, args, _) => vec![Target {
-                what: format!(
+            How::Run(program, args, bytes) => vec![one(
+                format!(
                     "{} {}",
                     program.file_name().unwrap_or_default().to_string_lossy(),
                     args.join(" ")
                 ),
-                how: format!("Runs {}", program.display()),
-            }],
-            How::System(command, dirs) => vec![Target {
-                what: format!("pkexec {}", command.join(" ")),
-                how: format!(
+                format!("Runs {}", program.display()),
+                *bytes,
+                Vec::new(),
+            )],
+            How::System(command, dirs) => vec![one(
+                format!("pkexec {}", command.join(" ")),
+                format!(
                     "Empties {}, asks for your password",
                     dirs.iter()
                         .map(|d| d.display().to_string())
                         .collect::<Vec<_>>()
                         .join(" and ")
                 ),
-            }],
-            How::Demo => vec![Target {
-                what: format!("~/demo/{}", self.name),
-                how: "Sample data, nothing is deleted".into(),
-            }],
+                self.left(),
+                Vec::new(),
+            )],
+            How::Demo => vec![one(
+                format!("~/demo/{}", self.name),
+                "Sample data, nothing is deleted".into(),
+                self.left(),
+                Vec::new(),
+            )],
         }
     }
 }
+
+/// Folders smaller than this share a line in the confirmation.
+const SMALL: u64 = 10_000_000;
 
 /// One line of the confirmation: a path or command, and what happens to it.
 pub struct Target {
     pub what: String,
     pub how: String,
+    /// What it frees, as of the scan.
+    pub bytes: u64,
+    /// What clearing leaves alone when this line is unticked. Empty for a
+    /// command, which runs whole or not at all.
+    pub paths: Vec<PathBuf>,
 }
 
 struct Spec {
@@ -538,6 +590,29 @@ const CACHES: &[Spec] = &[
         Pick::Dev,
     ),
     spec(
+        "Zed downloads",
+        "Language servers and Node.js Zed installed. Downloaded again when needed.",
+        &[
+            ".local/share/zed/languages",
+            ".local/share/zed/node",
+            ".local/share/zed/copilot",
+            "Library/Application Support/Zed/languages",
+            "Library/Application Support/Zed/node",
+            "Library/Application Support/Zed/copilot",
+        ],
+        230.0,
+        Source::App("dev.zed.Zed", None),
+        Pick::Dev,
+    ),
+    spec(
+        "Neovim plugins",
+        "Plugins and tools lazy.nvim and Mason installed. Installed again when Neovim starts.",
+        &[".local/share/nvim/lazy", ".local/share/nvim/mason"],
+        120.0,
+        Source::File,
+        Pick::Off,
+    ),
+    spec(
         "AUR builds",
         "Packages yay and paru built. Built again on the next update.",
         &[".cache/yay", ".cache/paru"],
@@ -834,6 +909,16 @@ const OPEN_APPS: &[OpenApp] = &[
         processes: &["Simulator.app/"],
     },
     OpenApp {
+        name: "Zed",
+        items: &["Zed downloads"],
+        processes: &["Zed.app/", "zed-editor"],
+    },
+    OpenApp {
+        name: "Neovim",
+        items: &["Neovim plugins"],
+        processes: &["nvim"],
+    },
+    OpenApp {
         name: "VS Code",
         items: &["VS Code caches"],
         processes: &[
@@ -938,6 +1023,9 @@ pub const EXTRA_ROOTS: &[&str] = &[
     ".composer",
     ".ccache",
     ".config/Code",
+    ".local/share/zed",
+    "Library/Application Support/Zed",
+    ".local/share/nvim",
     "Library/Application Support/Code",
     ".nuget",
     ".cabal",
@@ -992,7 +1080,8 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
 
     for spec in CACHES {
         let paths: Vec<PathBuf> = spec.paths.iter().map(|p| home.join(p)).collect();
-        let bytes = paths.iter().map(|p| index.size(p)).sum();
+        let sized: Vec<(PathBuf, u64)> = paths.iter().map(|p| (p.clone(), index.size(p))).collect();
+        let bytes = sized.iter().map(|(_, b)| b).sum();
         // Specs list paths for both systems; categorize by the one in use.
         let main = paths
             .iter()
@@ -1010,7 +1099,7 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
             category,
             pick: spec.pick,
             bytes,
-            how: How::Contents(paths, Vec::new()),
+            how: How::Contents(sized, Vec::new()),
         });
     }
 
@@ -1020,12 +1109,13 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
     } else {
         ".cache"
     });
-    let skip: Vec<_> = index
+    // One folder each, so any can be left out when clearing.
+    let rest: Vec<_> = index
         .subdirs(&caches)
         .into_iter()
         .filter(|(child, _)| {
-            claimed.iter().any(|c| c.starts_with(child))
-                || child
+            !claimed.iter().any(|c| c.starts_with(child))
+                && !child
                     .file_name()
                     .is_some_and(|n| protected_cache(&n.to_string_lossy()))
         })
@@ -1038,48 +1128,44 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         icon_file: Some(caches.clone()),
         category: Category::Caches,
         pick: Pick::On,
-        bytes: index
-            .size(&caches)
-            .saturating_sub(skip.iter().map(|(_, b)| b).sum()),
-        how: How::Contents(vec![caches], skip.into_iter().map(|(p, _)| p).collect()),
+        bytes: rest.iter().map(|(_, b)| b).sum(),
+        how: How::Contents(rest, Vec::new()),
     });
 
     // Logs and window state, only once nothing has touched them in a while.
-    const DAY: Duration = Duration::from_secs(86_400);
-    let logs = vec![
-        (home.join("Library/Logs"), 7 * DAY),
-        (
-            home.join("Library/Application Support/CrashReporter"),
-            30 * DAY,
-        ),
-    ];
     // Codex keeps its own history in its logs.
     let keep_logs = vec![home.join("Library/Logs/com.openai.codex")];
+    let logs: Vec<_> = app_logs(home)
+        .into_iter()
+        .map(|(dir, age)| {
+            let bytes = old_size(&dir, age, &keep_logs);
+            (dir, age, bytes)
+        })
+        .filter(|(_, _, b)| *b > 0)
+        .collect();
     found.push(Found {
         name: "Old logs".into(),
         detail: "Logs older than a week, crash reports older than a month.".into(),
         hue: 0.0,
         icon: Source::File,
-        icon_file: Some(logs[0].0.clone()),
+        icon_file: logs.first().map(|(d, _, _)| d.clone()),
         category: Category::System,
         pick: Pick::On,
-        bytes: logs
-            .iter()
-            .map(|(dir, age)| old_size(dir, *age, &keep_logs))
-            .sum(),
+        bytes: logs.iter().map(|(_, _, b)| b).sum(),
         how: How::Old(logs, keep_logs),
     });
-    let windows = vec![(home.join("Library/Saved Application State"), 30 * DAY)];
+    let windows = home.join("Library/Saved Application State");
+    let bytes = old_size(&windows, 30 * DAY, &[]);
     found.push(Found {
         name: "Old window state".into(),
         detail: "Windows apps saved to reopen, untouched for a month.".into(),
         hue: 0.0,
         icon: Source::File,
-        icon_file: Some(windows[0].0.clone()),
+        icon_file: Some(windows.clone()),
         category: Category::System,
         pick: Pick::On,
-        bytes: old_size(&windows[0].0, windows[0].1, &[]),
-        how: How::Old(windows, Vec::new()),
+        bytes,
+        how: How::Old(vec![(windows, 30 * DAY, bytes)], Vec::new()),
     });
 
     let projects: Vec<PathBuf> = PROJECTS.iter().map(|p| home.join(p)).collect();
@@ -1404,6 +1490,83 @@ pub fn detect(index: &Index, home: &Path) -> Vec<Item> {
         .collect()
 }
 
+const DAY: Duration = Duration::from_secs(86_400);
+
+/// Log and crash report folders, with how old a file in each must be to go.
+/// Besides the system's own, apps keep them inside their folders in
+/// Application Support, ~/.config, ~/.local/share and ~/.local/state, one
+/// or two levels down, like zed/logs or Code/logs.
+fn app_logs(home: &Path) -> Vec<(PathBuf, Duration)> {
+    const LOGS: &[&str] = &["log", "logs"];
+    const CRASHES: &[&str] = &[
+        "crashes",
+        "crashlogs",
+        "crash-reports",
+        "Crash Reports",
+        "CrashReporter",
+    ];
+    // Their logs are your chat history.
+    const CHATS: &[&str] = &[
+        "hexchat",
+        "weechat",
+        "irssi",
+        "konversation",
+        "quassel",
+        "polari",
+        "xchat",
+        "purple",
+        "Textual",
+    ];
+    let mut found = if cfg!(target_os = "macos") {
+        vec![
+            (home.join("Library/Logs"), 7 * DAY),
+            (
+                home.join("Library/Application Support/CrashReporter"),
+                30 * DAY,
+            ),
+        ]
+    } else {
+        Vec::new()
+    };
+    let homes: &[&str] = if cfg!(target_os = "macos") {
+        &["Library/Application Support"]
+    } else {
+        &[".config", ".local/share", ".local/state"]
+    };
+    let age = |name: &str| {
+        if LOGS.contains(&name) {
+            Some(7 * DAY)
+        } else if CRASHES.contains(&name) {
+            Some(30 * DAY)
+        } else {
+            None
+        }
+    };
+    for root in homes {
+        for app in apps::children(&home.join(root)) {
+            let name = app.file_name().map(|n| n.to_string_lossy().into_owned());
+            if name.is_some_and(|n| CHATS.iter().any(|c| n.eq_ignore_ascii_case(c)) || n == "Trash")
+            {
+                continue;
+            }
+            for dir in apps::children(&app) {
+                let name = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+                if let Some(age) = name.as_deref().and_then(age) {
+                    found.push((dir, age));
+                    continue;
+                }
+                for inner in apps::children(&dir) {
+                    let name = inner.file_name().map(|n| n.to_string_lossy().into_owned());
+                    if let Some(age) = name.as_deref().and_then(age) {
+                        found.push((inner, age));
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
 const WEB_CACHES: &[&[u8]] = &[
     b".next",
     b".turbo",
@@ -1562,12 +1725,31 @@ fn installers(downloads: &Path) -> Vec<(PathBuf, u64)> {
         .collect()
 }
 
+/// An item to clear, and the lines of its confirmation that were unticked.
+pub struct Chosen {
+    pub item: usize,
+    pub left_out: Vec<PathBuf>,
+    /// What the unticked lines come to.
+    pub left_out_bytes: u64,
+}
+
+impl Chosen {
+    pub fn whole(item: usize) -> Chosen {
+        Chosen {
+            item,
+            left_out: Vec::new(),
+            left_out_bytes: 0,
+        }
+    }
+}
+
 /// Clears all `chosen` items at once, one thread each, sharing the pool.
-pub fn clean(items: Arc<Vec<Item>>, chosen: Vec<usize>, progress: Arc<Progress>, demo: bool) {
+pub fn clean(items: Arc<Vec<Item>>, chosen: Vec<Chosen>, progress: Arc<Progress>, demo: bool) {
     progress.start_cleaning();
     std::thread::spawn(move || {
         std::thread::scope(|scope| {
-            for i in chosen {
+            for chosen in chosen {
+                let i = chosen.item;
                 let (item, progress) = (&items[i], &*progress);
                 scope.spawn(move || {
                     progress.set_cleaning(i, true);
@@ -1591,14 +1773,16 @@ pub fn clean(items: Arc<Vec<Item>>, chosen: Vec<usize>, progress: Arc<Progress>,
                             progress,
                             freed: &freed,
                             kept: &kept,
+                            left_out: &chosen.left_out,
                         };
                         tree::pool().install(|| run(&item.how, &clear));
                     }
                     let mut kept = kept.into_inner().unwrap();
                     // Most of it still there, with no reason known: files we
                     // weren't allowed to delete.
-                    let left = item.left();
-                    if kept.is_empty() && !demo && left > 100_000_000 && left * 2 > before {
+                    let left = item.left().saturating_sub(chosen.left_out_bytes);
+                    let asked = before.saturating_sub(chosen.left_out_bytes);
+                    if kept.is_empty() && !demo && left > 100_000_000 && left * 2 > asked {
                         kept.push("some files couldn't be deleted".into());
                     }
                     if !kept.is_empty() {
@@ -1665,11 +1849,20 @@ struct Clear<'a> {
     freed: &'a (dyn Fn(u64) + Sync),
     /// Why parts were left, for the note after clearing.
     kept: &'a Mutex<Vec<String>>,
+    /// Unticked in the confirmation.
+    left_out: &'a [PathBuf],
 }
 
 impl Clear<'_> {
-    /// Deletes `path` if the guard allows it.
+    fn wanted(&self, path: &Path) -> bool {
+        !self.left_out.iter().any(|p| p == path)
+    }
+
+    /// Deletes `path` if it wasn't unticked and the guard allows it.
     fn remove(&self, path: &Path) {
+        if !self.wanted(path) {
+            return;
+        }
         if let Some(dev) = self.guard.check(path) {
             remove_all(path, dev, self);
         }
@@ -1699,9 +1892,10 @@ fn run(how: &How, clear: &Clear) {
     let (progress, freed) = (clear.progress, clear.freed);
     match how {
         How::Contents(dirs, skip) => {
-            for dir in dirs {
+            for (dir, _) in dirs {
                 // Read only real folders inside home, never through a symlink.
-                if clear.guard.check(dir).is_none()
+                if !clear.wanted(dir)
+                    || clear.guard.check(dir).is_none()
                     || fs::symlink_metadata(dir).is_ok_and(|m| !m.is_dir())
                 {
                     continue;
@@ -1719,7 +1913,10 @@ fn run(how: &How, clear: &Clear) {
         }
         How::Old(dirs, skip) => {
             let now = SystemTime::now();
-            for (dir, age) in dirs {
+            for (dir, age, _) in dirs {
+                if !clear.wanted(dir) {
+                    continue;
+                }
                 let Some(dev) = clear.guard.check(dir) else {
                     continue;
                 };
@@ -1740,7 +1937,7 @@ fn run(how: &How, clear: &Clear) {
         }
         How::Worktrees(list) => {
             list.par_iter().for_each(|(path, bytes)| {
-                if clear.guard.check(path).is_none() {
+                if !clear.wanted(path) || clear.guard.check(path).is_none() {
                     return;
                 }
                 progress.show(path);
@@ -1768,6 +1965,9 @@ fn run(how: &How, clear: &Clear) {
                 let Some(udid) = path.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
+                if !clear.wanted(path) {
+                    continue;
+                }
                 if booted.contains(udid) {
                     running += 1;
                     continue;
@@ -1792,6 +1992,9 @@ fn run(how: &How, clear: &Clear) {
         }
         How::Emulators(avds) => {
             for (avd, _) in avds {
+                if !clear.wanted(avd) {
+                    continue;
+                }
                 if emulator_running(avd) {
                     let name = avd.file_stem().unwrap_or_default().to_string_lossy();
                     clear
@@ -2269,9 +2472,13 @@ mod tests {
             progress: &progress,
             freed: &|_| {},
             kept: &Mutex::default(),
+            left_out: &[],
         };
         run(
-            &How::Contents(vec![cache.clone(), home.join("linked")], Vec::new()),
+            &How::Contents(
+                vec![(cache.clone(), 0), (home.join("linked"), 0)],
+                Vec::new(),
+            ),
             &clear,
         );
         run(&How::Paths(vec![(outside.clone(), 0)]), &clear);
@@ -2383,10 +2590,11 @@ mod tests {
             progress: &progress,
             freed: &|_| {},
             kept: &Mutex::default(),
+            left_out: &[],
         };
         let week = Duration::from_secs(7 * 86_400);
         run(
-            &How::Old(vec![(logs.clone(), week)], vec![logs.join("codex")]),
+            &How::Old(vec![(logs.clone(), week, 0)], vec![logs.join("codex")]),
             &clear,
         );
         assert!(!logs.join("app/old.log").exists());
@@ -2401,6 +2609,74 @@ mod tests {
     }
 
     #[test]
+    fn unticked_lines_are_kept() {
+        let home = std::env::temp_dir().join(format!("bd-untick-{}", std::process::id()));
+        let (a, b, c) = (home.join("a"), home.join("b"), home.join("c"));
+        for dir in [&a, &b, &c] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join("f"), "x").unwrap();
+        }
+        let guard = Guard::new(&home).unwrap();
+        let progress = Progress::default();
+        let clear = Clear {
+            guard: &guard,
+            progress: &progress,
+            freed: &|_| {},
+            kept: &Mutex::default(),
+            left_out: &[b.clone(), c.clone()],
+        };
+        run(
+            &How::Contents(vec![(a.clone(), 0), (b.clone(), 0)], Vec::new()),
+            &clear,
+        );
+        run(&How::Paths(vec![(c.clone(), 0)]), &clear);
+        assert!(!a.join("f").exists());
+        assert!(b.join("f").exists());
+        assert!(c.join("f").exists());
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn finds_app_logs_but_not_chat_history() {
+        let home = std::env::temp_dir().join(format!("bd-logs-{}", std::process::id()));
+        let support = if cfg!(target_os = "macos") {
+            "Library/Application Support"
+        } else {
+            ".config"
+        };
+        for dir in [
+            "zed/logs",
+            "MongoDB Compass/CrashReporter",
+            "google-chrome/Crash Reports",
+            "hexchat/logs",
+            "notes/journal",
+        ] {
+            fs::create_dir_all(home.join(support).join(dir)).unwrap();
+        }
+        let mut found: Vec<_> = app_logs(&home)
+            .into_iter()
+            .filter_map(|(d, _)| {
+                d.strip_prefix(home.join(support))
+                    .ok()
+                    .map(Path::to_path_buf)
+            })
+            // macOS's own crash reports folder.
+            .filter(|d| d != Path::new("CrashReporter"))
+            .collect();
+        found.sort();
+        let want: Vec<PathBuf> = [
+            "MongoDB Compass/CrashReporter",
+            "google-chrome/Crash Reports",
+            "zed/logs",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert_eq!(found, want);
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
     fn reads_docker_sizes() {
         assert_eq!(docker_bytes("1.25GB"), Some(1_250_000_000));
         assert_eq!(docker_bytes("512kB"), Some(512_000));
@@ -2411,7 +2687,7 @@ mod tests {
     #[test]
     fn items_clear_at_the_same_time() {
         let items = Arc::new(demo());
-        let chosen: Vec<usize> = (0..items.len()).collect();
+        let chosen = (0..items.len()).map(Chosen::whole).collect();
         let progress = Arc::new(Progress::default());
         let start = Instant::now();
         clean(items.clone(), chosen, progress.clone(), true);

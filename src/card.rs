@@ -200,7 +200,7 @@ pub struct Card {
     dev_glow: f32,
     dev_hover: bool,
     /// Items waiting for the user to confirm clearing them.
-    confirm: Option<Vec<usize>>,
+    confirm: Option<confirm::Confirm>,
     confirm_scroll: scroll::Scroll,
     /// When the items arrived, for their staggered sweep in.
     items_at: f32,
@@ -385,7 +385,7 @@ impl Card {
         .detach();
     }
 
-    fn clear(&mut self, chosen: Vec<usize>, cx: &mut Context<Self>) {
+    fn clear(&mut self, chosen: Vec<clutter::Chosen>, cx: &mut Context<Self>) {
         let Some(items) = self.items.clone() else {
             return;
         };

@@ -15,7 +15,7 @@ use gpui_kit::*;
 
 use super::scroll::Scroll;
 use super::tip::Tip;
-use super::{BG, Card, FG, LINE, MUTED, Phase, WARN};
+use super::{BG, Card, LINE, MUTED, Phase, WARN};
 use crate::docker::{self, Chosen, Docker, State};
 use crate::icons::{self, Logo, Source};
 use crate::ui::z;
@@ -751,23 +751,7 @@ fn row(
     bytes: u64,
     toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    let check = div()
-        .size(z(15.0))
-        .flex_none()
-        .rounded(z(4.0))
-        .border_1()
-        .flex()
-        .items_center()
-        .justify_center()
-        .when(on, |c| {
-            c.bg(rgb(FG)).border_color(rgb(FG)).child(
-                svg()
-                    .path(IconName::Check.path())
-                    .size(z(11.0))
-                    .text_color(rgb(BG)),
-            )
-        })
-        .when(!on, |c| c.border_color(rgb(0x44444a)));
+    let check = super::confirm::check(on, false);
     h_flex()
         .id(id)
         .gap_2p5()
