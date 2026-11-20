@@ -1,13 +1,20 @@
 //! Quiet synthesized sounds for the dither: a tick as bars grow, the same
 //! tick played backwards as they shrink, and a soft whoosh when an item is
-//! cleared away. Without an audio device the app stays silent.
+//! cleared away. Without an audio device, or with `--no-sound`, the app
+//! stays silent.
+//!
+//! The output stream lives on its own thread and opens only while a sound
+//! plays, then closes after `IDLE`. An open stream keeps the output device
+//! active, which on macOS can pull Bluetooth headphones (AirPods) over to
+//! this Mac even though nothing is audible.
 
 use std::cell::{Cell, RefCell};
 use std::f32::consts::TAU;
 use std::fs::File;
 use std::io::Write;
 use std::num::NonZero;
-use std::time::Instant;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::{Duration, Instant};
 
 use rodio::buffer::SamplesBuffer;
 use rodio::cpal::BufferSize;
@@ -16,9 +23,13 @@ use rodio::{DeviceSinkBuilder, MixerDeviceSink};
 const RATE: u32 = 44_100;
 /// At most this many ticks a second, however fast a bar moves.
 const MAX_RATE: f32 = 24.0;
+/// How long the stream stays open after the last sound ends, so the ticks
+/// of one animation share a stream instead of reopening it each time.
+const IDLE: Duration = Duration::from_secs(2);
 
 pub struct Sound {
-    sink: Option<MixerDeviceSink>,
+    /// Feeds the audio thread. `None` when sound is off: no thread, no stream.
+    player: Option<Sender<Vec<f32>>>,
     seed: Cell<u32>,
     /// With `BEAUTIFULDISK_SOUND_LOG` set, every sound is also appended there
     /// (seconds since start as f64, sample count as u32, then f32 samples,
@@ -27,21 +38,25 @@ pub struct Sound {
 }
 
 impl Sound {
-    pub fn new() -> Self {
-        // Let the device pick its buffer size: rodio's default (2048) is
-        // more than some devices, like Bluetooth speakers, accept.
-        let sink = DeviceSinkBuilder::from_default_device()
-            .and_then(|b| b.with_buffer_size(BufferSize::Default).open_stream())
-            .or_else(|_| DeviceSinkBuilder::open_default_sink());
-        let sink = sink.ok().map(|mut sink| {
-            sink.log_on_drop(false);
-            sink
+    /// With `enabled` false nothing ever touches an audio device.
+    pub fn new(enabled: bool) -> Self {
+        let player = enabled.then(|| {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                run(rx, IDLE, open, |sink: &MixerDeviceSink, samples| {
+                    let channels = NonZero::new(1).unwrap();
+                    let rate = NonZero::new(RATE).unwrap();
+                    sink.mixer()
+                        .add(SamplesBuffer::new(channels, rate, samples));
+                })
+            });
+            tx
         });
         let log = std::env::var_os("BEAUTIFULDISK_SOUND_LOG")
             .and_then(|path| File::create(path).ok())
             .map(|file| RefCell::new((Instant::now(), file)));
         Self {
-            sink,
+            player,
             seed: Cell::new(0x9E37_79B9),
             log,
         }
@@ -64,11 +79,8 @@ impl Sound {
             record.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
             let _ = file.write_all(&record);
         }
-        if let Some(sink) = &self.sink {
-            let channels = NonZero::new(1).unwrap();
-            let rate = NonZero::new(RATE).unwrap();
-            sink.mixer()
-                .add(SamplesBuffer::new(channels, rate, samples));
+        if let Some(player) = &self.player {
+            let _ = player.send(samples);
         }
     }
 
@@ -116,6 +128,50 @@ impl Sound {
     }
 }
 
+fn open() -> Option<MixerDeviceSink> {
+    // Let the device pick its buffer size: rodio's default (2048) is
+    // more than some devices, like Bluetooth speakers, accept.
+    let sink = DeviceSinkBuilder::from_default_device()
+        .and_then(|b| b.with_buffer_size(BufferSize::Default).open_stream())
+        .or_else(|_| DeviceSinkBuilder::open_default_sink());
+    sink.ok().map(|mut sink| {
+        sink.log_on_drop(false);
+        sink
+    })
+}
+
+/// The audio thread: opens a stream for the first sound, plays into it, and
+/// drops it once `idle` has passed after the last sound ended. A failed open
+/// is not retried until that idle point, so a missing device costs one
+/// attempt per burst of sounds rather than one per tick.
+fn run<S>(
+    rx: Receiver<Vec<f32>>,
+    idle: Duration,
+    mut open: impl FnMut() -> Option<S>,
+    play: impl Fn(&S, Vec<f32>),
+) {
+    // `None`: closed. `Some(None)`: tried and failed. `Some(Some(_))`: open.
+    let mut stream: Option<Option<S>> = None;
+    let mut ends = Instant::now();
+    loop {
+        let next = match stream {
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(_) => rx.recv_timeout((ends + idle).saturating_duration_since(Instant::now())),
+        };
+        match next {
+            Ok(samples) => {
+                let now = Instant::now();
+                ends = ends.max(now) + Duration::from_secs_f32(samples.len() as f32 / RATE as f32);
+                if let Some(sink) = stream.get_or_insert_with(&mut open) {
+                    play(sink, samples);
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => stream = None,
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
 /// Turns a bar's motion into a stream of ticks: one per `step` of the bar
 /// travelled, but never faster than `MAX_RATE`.
 #[derive(Default)]
@@ -141,5 +197,67 @@ impl Ticker {
             self.since = 0.0;
             sound.tick(pitch.clamp(0.0, 1.0), delta < 0.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::rc::Rc;
+
+    #[test]
+    fn disabled_sound_has_no_audio_thread() {
+        let sound = Sound::new(false);
+        assert!(sound.player.is_none());
+        sound.whoosh();
+    }
+
+    /// Counts how many streams are open at once.
+    struct Stream(Rc<Cell<i32>>);
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() - 1);
+        }
+    }
+
+    #[test]
+    fn stream_opens_for_sound_and_closes_when_idle() {
+        let (tx, rx) = mpsc::channel();
+        let (report, events) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let live = Rc::new(Cell::new(0));
+            let opens = Cell::new(0);
+            run(
+                rx,
+                Duration::from_millis(50),
+                || {
+                    opens.set(opens.get() + 1);
+                    live.set(live.get() + 1);
+                    Some(Stream(live.clone()))
+                },
+                |stream: &Stream, _| report.send(("play", stream.0.get())).unwrap(),
+            );
+            report.send(("opens", opens.get())).unwrap();
+            report.send(("live", live.get())).unwrap();
+        });
+        // Two quick sounds share one stream; one after the idle gap reopens.
+        tx.send(vec![0.0; 10]).unwrap();
+        tx.send(vec![0.0; 10]).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        tx.send(vec![0.0; 10]).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        drop(tx);
+        worker.join().unwrap();
+        let got: Vec<_> = events.iter().collect();
+        assert_eq!(
+            got,
+            [
+                ("play", 1),
+                ("play", 1),
+                ("play", 1),
+                ("opens", 2),
+                ("live", 0)
+            ]
+        );
     }
 }

@@ -42,8 +42,11 @@ Works on Macs with Apple silicon and on x86_64 Linux, then opens the app. Run it
 ```sh
 cargo run --release            # run it
 cargo run --release -- --demo  # sample data, deletes nothing
+cargo run --release -- --no-sound  # silent: never opens an audio output
 ./bundle.sh --dmg              # Beautiful Disk.app and the DMG in target/release
 ./bundle-linux.sh              # on Linux: the release tarball in target/release
 ```
+
+The sound effects open the audio output only while they play and release it two seconds later. To keep Beautiful Disk off the audio device entirely, start it with `--no-sound`; for the installed app: `open -a "Beautiful Disk" --args --no-sound`.
 
 The launch video is made with [Remotion](https://www.remotion.dev) in [`launch-video/`](launch-video), from a recording of the app in `--autoplay` mode.
