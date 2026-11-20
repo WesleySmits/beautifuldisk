@@ -115,6 +115,8 @@ fn main() {
     // `--autoplay` is the demo playing itself: it hovers a few items, then clears.
     let autoplay = std::env::args().any(|arg| arg == "--autoplay");
     let demo = autoplay || std::env::args().any(|arg| arg == "--demo");
+    // `--no-sound` never opens an audio output stream.
+    let sound = !std::env::args().any(|arg| arg == "--no-sound");
     // Where to put an autoplay window ("x,y"), so a recording can keep it
     // clear of the pointer.
     let at = std::env::var("BEAUTIFULDISK_AT")
@@ -187,7 +189,7 @@ fn main() {
             ..Default::default()
         };
         open_window(options, cx, |_, cx| {
-            cx.new(|cx| card::Card::new(demo, autoplay, cx))
+            cx.new(|cx| card::Card::new(demo, autoplay, sound, cx))
         })
         .expect("failed to open window");
         cx.activate(true);

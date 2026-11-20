@@ -262,7 +262,7 @@ fn spring(x: f32, v: f32, dt: f32) -> (f32, f32) {
 }
 
 impl Card {
-    pub fn new(demo: bool, autoplay: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(demo: bool, autoplay: bool, sound: bool, cx: &mut Context<Self>) -> Self {
         let mut card = Self {
             demo,
             autoplay,
@@ -305,7 +305,7 @@ impl Card {
             pill: [0.0; 3],
             pill_velocity: [0.0; 3],
             pill_alpha: 0.0,
-            sound: Sound::new(),
+            sound: Sound::new(sound),
             ticker: Ticker::default(),
             was_cleaning: 0,
             kept: Vec::new(),
